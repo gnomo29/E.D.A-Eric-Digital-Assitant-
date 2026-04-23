@@ -1,0 +1,20 @@
+pipwin; platform_system == "Windows"
+requests>=2.32.0
+beautifulsoup4>=4.12.3
+ollama>=0.3.3
+pyttsx3>=2.90
+SpeechRecognition>=3.10.4
+pyaudio>=0.2.14; platform_system == "Windows"
+pyautogui>=0.9.54
+pygetwindow>=0.0.9
+psutil>=5.9.8
+pycaw>=20240210; platform_system == "Windows"
+screen-brightness-control>=0.24.2
+bleak>=0.22.3
+pyperclip>=1.9.0
+googlesearch-python>=1.2.5
+lxml>=5.3.0
+Pillow>=10.4.0
+duckduckgo-search>=6.3.0
+schedule>=1.2.2
+obsws-python

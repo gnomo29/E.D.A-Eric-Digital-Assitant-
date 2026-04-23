@@ -1,0 +1,20 @@
+{
+  "profile": {
+    "name": "Eric",
+    "language": "es"
+  },
+  "preferences": {
+    "voice_enabled": true,
+    "theme": "jarvis",
+    "model": "llama3.2:1b"
+  },
+  "history": [],
+  "chat_history": [],
+  "learned_commands": {},
+  "learned_skills": {},
+  "habits": {},
+  "remembered": {},
+  "reminders": [],
+  "knowledge_base": {},
+  "knowledge_order": []
+}
