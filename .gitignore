@@ -26,3 +26,11 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Secretos y entorno local (copiar .env.example → .env; no subir .env)
+.env
+.env.*
+!.env.example
+
+# Config local de herramientas (no forma parte del producto)
+.continue/
+

@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import argparse
 
-from gui import EDAGUI
-from logger import get_logger, setup_logging
-from memory import MemoryManager
-from utils import ensure_project_dirs
+from eda.gui import EDAGUI
+from eda.logger import get_logger, setup_logging
+from eda.memory import MemoryManager
+from eda.utils import ensure_project_dirs
 
 log = get_logger("main")
 
 
 def run_cli() -> None:
     """Modo simple por consola para diagnóstico rápido."""
-    from core import EDACore
+    from eda.core import EDACore
 
     memory = MemoryManager()
     core = EDACore(memory_manager=memory)

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eda-assistant"
+version = "2.0.0"
+description = "E.D.A. — asistente local con voz, GUI y autoaprendizaje controlado"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "requests>=2.32.0",
+    "urllib3>=2.2.0",
+    "certifi>=2024.2.2",
+    "charset-normalizer>=3.3.0",
+    "beautifulsoup4>=4.12.3",
+    "ollama>=0.3.3",
+    "pyttsx3>=2.90",
+    "SpeechRecognition>=3.10.4",
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+    "psutil>=5.9.8",
+    "screen-brightness-control>=0.24.2",
+    "bleak>=0.22.3",
+    "pyperclip>=1.9.0",
+    "googlesearch-python>=1.2.5",
+    "lxml>=5.3.0",
+    "Pillow>=10.4.0",
+    "duckduckgo-search>=6.3.0",
+    "schedule>=1.2.2",
+    "obsws-python",
+]
+
+[tool.setuptools.packages.find]
+include = ["eda*"]

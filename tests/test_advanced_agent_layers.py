@@ -1,7 +1,7 @@
 import unittest
 
-from objective_planner import ObjectivePlanner
-from security_levels import SecurityManager
+from eda.objective_planner import ObjectivePlanner
+from eda.security_levels import SecurityManager
 
 
 class AdvancedAgentLayersTests(unittest.TestCase):

@@ -1,10 +1,10 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from actions import ActionController
-from nlp_utils import parse_command
-from web_search import WebSearch
-from web_solver import WebSolver
+from eda.actions import ActionController
+from eda.nlp_utils import parse_command
+from eda.web_search import WebSearch
+from eda.web_solver import WebSolver
 
 
 class WebAndActionsTests(unittest.TestCase):
@@ -36,7 +36,7 @@ class WebAndActionsTests(unittest.TestCase):
         self.assertEqual(ac.extract_spotify_play_query("reprodusca bohemian rhapsody"), "bohemian rhapsody")
         self.assertEqual(ac.extract_spotify_play_query("reproduce algo en youtube"), "")
 
-    @patch("actions.webbrowser.open")
+    @patch("eda.actions.webbrowser.open")
     def test_execute_navigation_command_steam(self, mock_open) -> None:
         ac = ActionController()
         result = ac.execute_navigation_command("busca terraria en steam")
@@ -63,7 +63,7 @@ class WebAndActionsTests(unittest.TestCase):
         self.assertEqual(ard.intent, "arduino_help")
         self.assertEqual(ard.entity, "serial monitor no abre")
 
-    @patch("actions.subprocess.run")
+    @patch("eda.actions.subprocess.run")
     def test_list_usb_devices_windows(self, mock_run) -> None:
         ac = ActionController()
         ac.platform = "win32"
@@ -86,6 +86,20 @@ class WebAndActionsTests(unittest.TestCase):
         self.assertEqual(payload.get("status"), "ok")
         code = str(payload.get("code", ""))
         self.assertIn("BluetoothManager", code)
+
+    def test_autolearn_fallback_without_ollama_or_web(self) -> None:
+        """Sin Ollama ni resultados web, debe devolver una función guía (no error genérico)."""
+        mock_core = MagicMock()
+        mock_core.is_ollama_alive = lambda: False
+        solver = WebSolver(core=mock_core)
+        with patch.object(solver, "search_learning_resources", return_value=[]):
+            payload = solver.generate_autolearn_payload(
+                "configurar impresora en red inexistente xyz123", intent="chat"
+            )
+        self.assertEqual(payload.get("status"), "ok")
+        code = str(payload.get("code", ""))
+        self.assertTrue(code.startswith("def "))
+        self.assertIn("reformul", code.lower())
 
 
 if __name__ == "__main__":

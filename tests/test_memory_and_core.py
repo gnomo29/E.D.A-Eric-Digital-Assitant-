@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import config
-from core import EDACore
-from memory import MemoryManager
+from eda import config
+from eda.core import EDACore
+from eda.memory import MemoryManager
 
 
 class MemoryAndCoreTests(unittest.TestCase):
@@ -69,7 +69,7 @@ class MemoryAndCoreTests(unittest.TestCase):
                 patch.object(config, "SOLUTIONS_CACHE_FILE", base / "solutions_cache.json"),
             ):
                 memory = MemoryManager()
-                memory.save_learned_skill("abrir obs", "abre obs", "actions.py", "open_app")
+                memory.save_learned_skill("abrir obs", "abre obs", "eda/actions.py", "open_app")
                 self.assertTrue(memory.forget_learned_skill("abrir obs"))
                 skills = memory.get_learned_skills()
                 self.assertEqual(skills, {})
@@ -122,7 +122,7 @@ class MemoryAndCoreTests(unittest.TestCase):
             core.should_activate_auto_learn("hola", "no puedo ayudarte"),
         )
 
-    @patch("core.webbrowser.open")
+    @patch("eda.core.webbrowser.open")
     def test_open_browser_for_research(self, mock_open) -> None:
         core = EDACore(memory_manager=object())
         core.web_search.search_google_snippets = lambda _q, max_results=4: [
@@ -148,7 +148,7 @@ class MemoryAndCoreTests(unittest.TestCase):
                 data["learned_skills"] = {
                     "cam": {
                         "trigger": "aprender a controlar la cámara",
-                        "module": "skills_auto.py",
+                        "module": "eda/skills_auto.py",
                         "function": "learned_aprender_a_controlar_la",
                     }
                 }

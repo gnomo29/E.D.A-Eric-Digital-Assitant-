@@ -1,7 +1,7 @@
 import unittest
 
-import config
-from utils import build_http_session
+from eda import config
+from eda.utils import build_http_session
 
 
 class HttpSessionTests(unittest.TestCase):

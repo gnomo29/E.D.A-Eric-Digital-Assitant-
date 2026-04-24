@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime
 
-from scheduler import ReminderScheduler, parse_reminder_request
+from eda.scheduler import ReminderScheduler, parse_reminder_request
 
 
 class SchedulerReminderTests(unittest.TestCase):

@@ -6,15 +6,18 @@ E.D.A. integra:
 - Interfaz gráfica futurista con `tkinter`
 - IA local con **Ollama + llama3.2:1b**
 - Voz (STT + TTS) en español
-- Resolución técnica web inteligente (`web_solver.py`)
+- Resolución técnica web inteligente (`eda/web_solver.py`)
 - Automatización de sistema, mouse/teclado, portapapeles
 - Escaneo Bluetooth con `bleak`
 - Autoevolución de código con backups automáticos y validación AST
 
-Guía para principiantes (archivo por archivo):
-- `GUIA_NOVATO_CODIGO.md`
-- `GUIA_LIBRERIAS_Y_EXTENSIONES.md` (librerías, extensiones y buenas prácticas)
-- `EJEMPLOS_CAPACIDADES_EDA.txt` (frases de ejemplo por capacidad; mantener al día con el código)
+Guía para principiantes (en la carpeta `docs/`):
+- `docs/GUIA_NOVATO_CODIGO.md`
+- `docs/GUIA_LIBRERIAS_Y_EXTENSIONES.md` (librerías, extensiones y buenas prácticas)
+- `docs/EJEMPLOS_CAPACIDADES_EDA.txt` (frases de ejemplo por capacidad; mantener al día con el código)
+- Índice breve: `docs/README.md`
+
+En Windows, instalación y arranque rápido: ejecutables en `scripts/windows/` (por ejemplo `Iniciar_EDA.bat`, `INSTALAR_EDA.cmd`). Esos scripts hacen `cd` a la raíz del proyecto automáticamente.
 
 ---
 
@@ -52,6 +55,8 @@ pip install -r requirements.txt
    python main.py
    ```
 
+O desde el Explorador de archivos, en `scripts/windows/`, doble clic en `Iniciar_EDA.bat` (requiere `venv312` en la raíz del proyecto, como indica el propio script).
+
 ### Pruebas rápidas (recomendado antes de cambios grandes)
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -64,7 +69,7 @@ python health_check.py
 ```
 
 Seguridad configurable:
-- En `config.py`, cambia `ASK_PERMISSION_FOR_SENSITIVE_ACTIONS = True/False` para activar o desactivar la petición de permiso antes de acciones sensibles.
+- En `eda/config.py`, cambia `ASK_PERMISSION_FOR_SENSITIVE_ACTIONS = True/False` para activar o desactivar la petición de permiso antes de acciones sensibles.
 
 ---
 
@@ -85,6 +90,17 @@ Seguridad configurable:
    ```
 
 Si Ollama no está activo, E.D.A. entra en modo degradado y te avisará.
+
+### 3.1) LLM remoto (opcional)
+
+Por defecto **no se usa** ningún proveedor en la nube: quien clone el repo no necesita API keys.
+
+Si querés un modelo remoto (OpenAI u otro endpoint compatible con `/chat/completions`):
+
+1. Copiá `.env.example` a `.env` y rellená las variables `EDA_REMOTE_LLM_*`, **o** definí esas variables en el sistema.
+2. Ajustá `EDA_REMOTE_LLM_MODE` según el uso: `fallback` (cuando Ollama no responde), `research` (síntesis en `web_solver`), `code_review` (revisión de código generado en autoaprendizaje), `research_and_review` (ambos).
+
+La GUI muestra el estado en **Configuración**; `python health_check.py` incluye líneas `remote_llm` y `remote_llm_mode`.
 
 ---
 
@@ -125,35 +141,57 @@ Notas:
 
 ```text
 EDA_Project/
-├── main.py
-├── config.py
-├── gui.py
-├── core.py
-├── voice.py
-├── nlp_utils.py
-├── actions.py
-├── mouse_keyboard.py
-├── file_manager.py
-├── memory.py
-├── web_search.py
-├── web_solver.py
-├── bluetooth_manager.py
-├── integration_hub.py
-├── obs_controller.py
-├── objective_planner.py
-├── multimodal.py
-├── optimizer.py
-├── evolution.py
-├── skills_auto.py
-├── security_levels.py
-├── scheduler.py
-├── system_info.py
-├── clipboard.py
-├── logger.py
-├── utils.py
-├── health_check.py
+├── main.py                 # Arranque (importa el paquete eda)
+├── health_check.py         # Delegación a eda.health_check
 ├── requirements.txt
+├── pyproject.toml          # Metadatos / instalación opcional con pip
+├── .env.example            # Plantilla de variables (p. ej. LLM remoto); no incluye secretos
 ├── README.md
+├── eda/                    # Código de la aplicación (paquete Python)
+│   ├── __init__.py
+│   ├── config.py
+│   ├── gui.py
+│   ├── core.py
+│   ├── remote_llm.py       # Cliente opcional API compatible OpenAI
+│   ├── improvement_planner.py
+│   ├── audit_log.py
+│   ├── voice.py
+│   ├── nlp_utils.py
+│   ├── actions.py
+│   ├── mouse_keyboard.py
+│   ├── file_manager.py
+│   ├── memory.py
+│   ├── web_search.py
+│   ├── web_solver.py
+│   ├── bluetooth_manager.py
+│   ├── integration_hub.py
+│   ├── obs_controller.py
+│   ├── objective_planner.py
+│   ├── multimodal.py
+│   ├── optimizer.py
+│   ├── evolution.py
+│   ├── skills_auto.py
+│   ├── security_levels.py
+│   ├── scheduler.py
+│   ├── system_info.py
+│   ├── clipboard.py
+│   ├── logger.py
+│   ├── utils.py
+│   └── health_check.py
+├── docs/
+│   ├── README.md
+│   ├── GUIA_NOVATO_CODIGO.md
+│   ├── GUIA_LIBRERIAS_Y_EXTENSIONES.md
+│   └── EJEMPLOS_CAPACIDADES_EDA.txt
+├── scripts/
+│   └── windows/
+│       ├── Iniciar_EDA.bat
+│       ├── Iniciar_EDA_Silencioso.vbs
+│       ├── INSTALAR_EDA.cmd
+│       ├── Instalar_y_Lanzar_EDA.bat
+│       ├── Setup_EDA_Debug.bat
+│       ├── Setup_EDA_SinOllama.bat
+│       └── Setup_y_Lanzar_EDA.bat
 ├── tests/
 ├── memory/
 │   ├── memoria.json
@@ -173,13 +211,13 @@ EDA_Project/
 - "E.D.A., abre notepad"
 - "Jarvis, optimiza el sistema"
 - "E.D.A., escanea bluetooth"
-- "Investiga parpadeo LED Arduino sin delay" (comando forzado de investigación en `core.py`)
-- "Busca tutoriales de Python" / "Consulta el precio del dólar" (intención `search_web` en `nlp_utils.py`; la consulta va en `entity` del comando parseado)
+- "Investiga parpadeo LED Arduino sin delay" (comando forzado de investigación en `eda/core.py`)
+- "Busca tutoriales de Python" / "Consulta el precio del dólar" (intención `search_web` en `eda/nlp_utils.py`; la consulta va en `entity` del comando parseado)
 - "Muéstrame estado de cpu y ram"
 
-**Preguntas con `?`:** las que empiezan como orden (p. ej. "¿abre Chrome?", "sube el volumen?") no se tratan como solo “pregunta de conocimiento” para abrir investigación web; las dudas tipo “¿Qué es un agujero negro?” sí pueden activar el flujo de investigación según permisos (`core.is_research_like_query`).
+**Preguntas con `?`:** las que empiezan como orden (p. ej. "¿abre Chrome?", "sube el volumen?") no se tratan como solo “pregunta de conocimiento” para abrir investigación web; las dudas tipo “¿Qué es un agujero negro?” sí pueden activar el flujo de investigación según permisos (lógica en `eda/core.py`, `is_research_like_query`).
 
-Lista ampliada de frases: `EJEMPLOS_CAPACIDADES_EDA.txt`.
+Lista ampliada de frases: `docs/EJEMPLOS_CAPACIDADES_EDA.txt`.
 
 Wake words soportadas:
 - `E.D.A.`
@@ -188,7 +226,7 @@ Wake words soportadas:
 
 ---
 
-## 8) `web_solver.py` (módulo crítico)
+## 8) `eda/web_solver.py` (módulo crítico)
 
 Pipeline:
 1. Busca en fuentes técnicas (DuckDuckGo + StackOverflow + Arduino Forum)
@@ -199,7 +237,7 @@ Pipeline:
 
 ### Ejemplo de uso directo
 ```python
-from web_solver import WebSolver
+from eda.web_solver import WebSolver
 
 solver = WebSolver()
 result = solver.solve("Cómo parpadear LED en Arduino sin delay")
@@ -214,7 +252,7 @@ print(code)
 
 ---
 
-## 9) Autoevolución (`evolution.py`) - cómo funciona
+## 9) Autoevolución (`eda/evolution.py`) - cómo funciona
 
 Características:
 - Hace backup **antes** de modificar archivo
@@ -234,7 +272,7 @@ Si la ruta Windows no existe (por ejemplo, ejecutando en Linux), E.D.A. continú
 ## 10) Confirmaciones obligatorias
 
 Operaciones críticas (apagar, reiniciar, cerrar procesos) solicitan confirmación.
-Esto está centralizado en `actions.py` + callback GUI.
+Esto está centralizado en `eda/actions.py` + callback GUI.
 
 ---
 
@@ -243,7 +281,7 @@ Esto está centralizado en `actions.py` + callback GUI.
 ## 11.1 "No tengo conexión con Ollama"
 - Ejecuta `ollama serve`
 - Verifica que el modelo exista: `ollama list`
-- Revisa `config.py` (`OLLAMA_MODEL = "llama3.2:1b"`)
+- Revisa `eda/config.py` (`OLLAMA_MODEL = "llama3.2:1b"`)
 
 ## 11.2 El micrófono no activa
 - Verifica permisos de micrófono en Windows
