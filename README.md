@@ -1,399 +1,120 @@
-# E.D.A. (Enhanced Digital Assistant) - Proyecto Completo
+# E.D.A. — Enhanced Digital Assistant
 
-Asistente estilo JARVIS para Windows 10/11 (también ejecutable en Linux/macOS con funciones degradadas).
+Asistente de escritorio estilo JARVIS (Windows 10/11 principalmente; en Linux/macOS parte de las funciones se degrada con elegancia).
 
-E.D.A. integra:
-- Interfaz gráfica futurista con `tkinter`
-- IA local con **Ollama + llama3.2:1b**
-- Voz (STT + TTS) en español
-- Resolución técnica web inteligente (`eda/web_solver.py`)
-- Automatización de sistema, mouse/teclado, portapapeles
-- Escaneo Bluetooth con `bleak`
-- Autoevolución de código con backups automáticos y validación AST
+## Qué hace
 
-Guía para principiantes (en la carpeta `docs/`):
-- `docs/GUIA_NOVATO_CODIGO.md`
-- `docs/GUIA_LIBRERIAS_Y_EXTENSIONES.md` (librerías, extensiones y buenas prácticas)
-- `docs/EJEMPLOS_CAPACIDADES_EDA.txt` (frases de ejemplo por capacidad; mantener al día con el código)
-- Índice breve: `docs/README.md`
+| Área | Detalle breve |
+|------|----------------|
+| Interfaz | GUI `tkinter`, chat, panel de estado |
+| IA local | [Ollama](https://ollama.com) (`eda/core.py`) — modelo por defecto en `eda/config.py` |
+| IA remota | **Opcional** — API compatible OpenAI; ver `.env.example` y sección *LLM remoto* |
+| Voz | TTS (`pyttsx3`) + STT (`speech_recognition`) en español |
+| Sistema | Apps, volumen, brillo, Bluetooth, optimización (`eda/actions.py`, etc.) |
+| Web | Búsqueda, scraping acotado, síntesis (`eda/web_solver.py`) |
+| Memoria | JSON local bajo `memory/` (archivos reales ignorados por Git; hay `.example.json`) |
+| Código | Autoaprendizaje con confirmación, evolution con backup (`eda/evolution.py`) |
 
-En Windows, instalación y arranque rápido: ejecutables en `scripts/windows/` (por ejemplo `Iniciar_EDA.bat`, `INSTALAR_EDA.cmd`). Esos scripts hacen `cd` a la raíz del proyecto automáticamente.
+## Inicio rápido
 
----
-
-## 1) Requisitos del sistema
-
-### Recomendado
-- Windows 10/11
-- 8GB RAM
-- Python 3.10+
-- Ollama instalado y funcionando
-
-### Dependencias de Python
-Instalación:
 ```bash
+cd EDA_Project
+python -m venv venv312
+venv312\Scripts\activate
 pip install -r requirements.txt
+python main.py
 ```
 
----
+**Windows sin terminal:** `scripts/windows/Iniciar_EDA.bat` (espera `venv312` en la raíz) o `INSTALAR_EDA.cmd` para instalación guiada.
 
-## 2) Instalación paso a paso
+**CLI de prueba:** `python main.py --cli`
 
-1. Descomprime el proyecto.
-2. Abre terminal dentro de la carpeta del proyecto.
-3. (Opcional) crea entorno virtual:
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate
-   ```
-4. Instala librerías:
-   ```bash
-   pip install -r requirements.txt
-   ```
-5. Ejecuta:
-   ```bash
-   python main.py
-   ```
+**Tests:** `python -m unittest discover -s tests -p "test_*.py"`
 
-O desde el Explorador de archivos, en `scripts/windows/`, doble clic en `Iniciar_EDA.bat` (requiere `venv312` en la raíz del proyecto, como indica el propio script).
+**Salud del entorno:** `python health_check.py`
 
-### Pruebas rápidas (recomendado antes de cambios grandes)
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-Incluye comprobaciones de memoria, recordatorios, NLP (`parse_command`), web y capas avanzadas. Si falta algún paquete (p. ej. `requests`, `bs4`), instálalo con `pip` antes de ejecutar la suite completa.
+## Ollama
 
-### Health check del entorno
-```bash
-python health_check.py
-```
+1. Instalar Ollama y ejecutar `ollama serve`.
+2. `ollama pull llama3.2:1b` (o el modelo definido en `OLLAMA_MODEL` dentro de `eda/config.py`).
+3. Si Ollama no está, E.D.A. usa fallbacks (web / mensaje degradado) según el flujo.
 
-Seguridad configurable:
-- En `eda/config.py`, cambia `ASK_PERMISSION_FOR_SENSITIVE_ACTIONS = True/False` para activar o desactivar la petición de permiso antes de acciones sensibles.
+## LLM remoto (opcional)
 
----
+Por defecto **no** se llama a ninguna nube. Quien clone el repo no necesita API keys.
 
-## 3) Configurar Ollama (obligatorio para IA local)
+1. Copiar `.env.example` → `.env` y completar `EDA_REMOTE_LLM_*`, **o** exportar las mismas variables en el sistema.
+2. Modo `EDA_REMOTE_LLM_MODE`: `off` | `fallback` | `research` | `code_review` | `research_and_review` (detalle en comentarios de `eda/config.py`).
 
-1. Instala Ollama desde: https://ollama.com
-2. Descarga el modelo:
-   ```bash
-   ollama pull llama3.2:1b
-   ```
-3. Inicia servicio:
-   ```bash
-   ollama serve
-   ```
-4. Verifica en otra terminal:
-   ```bash
-   ollama list
-   ```
+Estado visible en la GUI (**Configuración**) y en `health_check.py`.
 
-Si Ollama no está activo, E.D.A. entra en modo degradado y te avisará.
+## Documentación y ejemplos
 
-### 3.1) LLM remoto (opcional)
+| Ruta | Contenido |
+|------|------------|
+| `docs/README.md` | Índice de la carpeta `docs/` |
+| `docs/GUIA_NOVATO_CODIGO.md` | Recorrido por módulos |
+| `docs/GUIA_LIBRERIAS_Y_EXTENSIONES.md` | Dependencias y prácticas |
+| `docs/EJEMPLOS_CAPACIDADES_EDA.txt` | Frases de prueba (voz / texto) |
+| `scripts/windows/README.md` | Lanzadores Windows |
 
-Por defecto **no se usa** ningún proveedor en la nube: quien clone el repo no necesita API keys.
+Wake words habituales: `E.D.A.`, `eda`, `jarvis`.
 
-Si querés un modelo remoto (OpenAI u otro endpoint compatible con `/chat/completions`):
-
-1. Copiá `.env.example` a `.env` y rellená las variables `EDA_REMOTE_LLM_*`, **o** definí esas variables en el sistema.
-2. Ajustá `EDA_REMOTE_LLM_MODE` según el uso: `fallback` (cuando Ollama no responde), `research` (síntesis en `web_solver`), `code_review` (revisión de código generado en autoaprendizaje), `research_and_review` (ambos).
-
-La GUI muestra el estado en **Configuración**; `python health_check.py` incluye líneas `remote_llm` y `remote_llm_mode`.
-
----
-
-## 4) Configurar voz en español
-
-## 4.1 TTS (pyttsx3)
-- E.D.A. selecciona automáticamente una voz en español si está disponible.
-- Si no encuentra voz español, usa la predeterminada del sistema.
-
-## 4.2 STT (speech_recognition + pyaudio)
-En Windows, `pyaudio` puede requerir wheel compilada.
-
-Opciones:
-1. Intentar directo:
-   ```bash
-   pip install pyaudio
-   ```
-2. Si falla, instalar wheel compatible con tu versión de Python.
-3. Reiniciar aplicación.
-
----
-
-## 5) Configurar Bluetooth (`bleak`)
-
-Instala con:
-```bash
-pip install bleak
-```
-
-Notas:
-- Requiere adaptador Bluetooth activo.
-- En Windows, permisos y drivers deben estar correctos.
-- Si falla, E.D.A. no crashea: responde en modo degradado.
-
----
-
-## 6) Estructura del proyecto
+## Estructura del repositorio
 
 ```text
 EDA_Project/
-├── main.py                 # Arranque (importa el paquete eda)
-├── health_check.py         # Delegación a eda.health_check
+├── main.py              # Entrada: GUI o --cli
+├── health_check.py      # Wrapper → eda.health_check
 ├── requirements.txt
-├── pyproject.toml          # Metadatos / instalación opcional con pip
-├── .env.example            # Plantilla de variables (p. ej. LLM remoto); no incluye secretos
-├── README.md
-├── eda/                    # Código de la aplicación (paquete Python)
-│   ├── __init__.py
-│   ├── config.py
-│   ├── gui.py
-│   ├── core.py
-│   ├── remote_llm.py       # Cliente opcional API compatible OpenAI
-│   ├── improvement_planner.py
-│   ├── audit_log.py
-│   ├── voice.py
-│   ├── nlp_utils.py
-│   ├── actions.py
-│   ├── mouse_keyboard.py
-│   ├── file_manager.py
-│   ├── memory.py
-│   ├── web_search.py
-│   ├── web_solver.py
-│   ├── bluetooth_manager.py
-│   ├── integration_hub.py
-│   ├── obs_controller.py
-│   ├── objective_planner.py
-│   ├── multimodal.py
-│   ├── optimizer.py
-│   ├── evolution.py
-│   ├── skills_auto.py
-│   ├── security_levels.py
-│   ├── scheduler.py
-│   ├── system_info.py
-│   ├── clipboard.py
-│   ├── logger.py
-│   ├── utils.py
-│   └── health_check.py
+├── pyproject.toml
+├── .env.example
+├── eda/                 # Paquete principal (GUI, core, web_solver, memory, …)
 ├── docs/
-│   ├── README.md
-│   ├── GUIA_NOVATO_CODIGO.md
-│   ├── GUIA_LIBRERIAS_Y_EXTENSIONES.md
-│   └── EJEMPLOS_CAPACIDADES_EDA.txt
-├── scripts/
-│   └── windows/
-│       ├── Iniciar_EDA.bat
-│       ├── Iniciar_EDA_Silencioso.vbs
-│       ├── INSTALAR_EDA.cmd
-│       ├── Instalar_y_Lanzar_EDA.bat
-│       ├── Setup_EDA_Debug.bat
-│       ├── Setup_EDA_SinOllama.bat
-│       └── Setup_y_Lanzar_EDA.bat
+├── scripts/windows/     # .bat / .cmd / .vbs
 ├── tests/
-├── memory/
-│   ├── memoria.json
-│   ├── bluetooth_devices.json
-│   └── solutions_cache.json
-├── solutions/
-├── captures/
-├── backups/
-├── logs/
-└── suggestions/
+├── memory/              # *.json runtime en .gitignore; solo *.example.json en Git
+├── logs/ backups/ …     # Generados en ejecución (ignorados)
+└── …
 ```
 
----
+## Configuración útil
 
-## 7) Comandos de voz y texto (ejemplos)
+- **Permisos GUI** y familia de acciones: panel **Permisos** en la aplicación; persisten en memoria.
+- **Confirmaciones sensibles:** `ASK_PERMISSION_FOR_SENSITIVE_ACTIONS` en `eda/config.py`.
+- **Ollama:** `OLLAMA_MODEL`, URLs en `eda/config.py`.
 
-- "E.D.A., abre notepad"
-- "Jarvis, optimiza el sistema"
-- "E.D.A., escanea bluetooth"
-- "Investiga parpadeo LED Arduino sin delay" (comando forzado de investigación en `eda/core.py`)
-- "Busca tutoriales de Python" / "Consulta el precio del dólar" (intención `search_web` en `eda/nlp_utils.py`; la consulta va en `entity` del comando parseado)
-- "Muéstrame estado de cpu y ram"
+## Web solver (resumen)
 
-**Preguntas con `?`:** las que empiezan como orden (p. ej. "¿abre Chrome?", "sube el volumen?") no se tratan como solo “pregunta de conocimiento” para abrir investigación web; las dudas tipo “¿Qué es un agujero negro?” sí pueden activar el flujo de investigación según permisos (lógica en `eda/core.py`, `is_research_like_query`).
+Flujo típico: búsqueda (p. ej. DuckDuckGo) → scrape limitado → síntesis con Ollama o LLM remoto (según modo) → caché en `memory/solutions_cache.json`. Uso programático: `from eda.web_solver import WebSolver`.
 
-Lista ampliada de frases: `docs/EJEMPLOS_CAPACIDADES_EDA.txt`.
+## Autoevolución
 
-Wake words soportadas:
-- `E.D.A.`
-- `eda`
-- `jarvis`
+`EvolutionEngine`: backup antes de escribir, validación `ast.parse()`, sugerencias en `suggestions/`. La autoevolución “en bloque” del menú normaliza finales de línea en `.py` del proyecto; el autoaprendizaje confirmado por el usuario puede añadir funciones a módulos elegidos (p. ej. `eda/skills_auto.py`).
 
----
+## Problemas frecuentes
 
-## 8) `eda/web_solver.py` (módulo crítico)
+| Síntoma | Qué revisar |
+|---------|----------------|
+| Sin Ollama | `ollama serve`, `ollama list`, firewall local |
+| Micrófono | Permisos Windows; `pyaudio` / `speechrecognition` |
+| Sin Bluetooth | Adaptador encendido; paquete `bleak` |
+| GUI no abre | `python -m tkinter` |
+| pyautogui | Sesión de escritorio activa; permisos de usuario |
 
-Pipeline:
-1. Busca en fuentes técnicas (DuckDuckGo + StackOverflow + Arduino Forum)
-2. Hace scraping con `requests` + `beautifulsoup4`
-3. Sintetiza respuesta con Ollama
-4. Cachea solución en `memory/solutions_cache.json`
-5. Si no puede resolver, abre navegador como fallback
+Log principal: `logs/eda.log`.
 
-### Ejemplo de uso directo
-```python
-from eda.web_solver import WebSolver
+## Git y colaboración
 
-solver = WebSolver()
-result = solver.solve("Cómo parpadear LED en Arduino sin delay")
-print(result["answer"])
-```
+`.gitignore` excluye `.env`, `venv*/`, `memory/*.json` (no los `.example.json`), logs, backups, etc. **No subir** claves ni `memoria.json` personal.
 
-### Generación de código
-```python
-code = solver.generate_code("Control de servo con botón", language="arduino")
-print(code)
-```
-
----
-
-## 9) Autoevolución (`eda/evolution.py`) - cómo funciona
-
-Características:
-- Hace backup **antes** de modificar archivo
-- Valida sintaxis Python con `ast.parse()`
-- Registra eventos en log
-- Guarda sugerencias en `suggestions/`
-
-### Backups
-- Locales: `backups/YYYY-MM-DD_HH-MM-SS/...`
-- Ruta objetivo Windows (cuando esté disponible):
-  - `C:\Users\Eric\Desktop\EDA_Backups\YYYY-MM-DD_HH-MM-SS\...`
-
-Si la ruta Windows no existe (por ejemplo, ejecutando en Linux), E.D.A. continúa sin fallar.
-
----
-
-## 10) Confirmaciones obligatorias
-
-Operaciones críticas (apagar, reiniciar, cerrar procesos) solicitan confirmación.
-Esto está centralizado en `eda/actions.py` + callback GUI.
-
----
-
-## 11) Troubleshooting
-
-## 11.1 "No tengo conexión con Ollama"
-- Ejecuta `ollama serve`
-- Verifica que el modelo exista: `ollama list`
-- Revisa `eda/config.py` (`OLLAMA_MODEL = "llama3.2:1b"`)
-
-## 11.2 El micrófono no activa
-- Verifica permisos de micrófono en Windows
-- Reinstala `speechrecognition` y `pyaudio`
-- Prueba otro dispositivo de entrada
-
-## 11.3 pyautogui falla
-- Ejecuta con permisos de usuario adecuados
-- Asegura que la sesión de escritorio esté activa
-
-## 11.4 Bluetooth vacío
-- Revisa que Bluetooth esté encendido
-- Prueba con dispositivos cercanos y visibles
-- Reinstala `bleak`
-
-## 11.5 GUI no abre
-- Verifica Python con soporte `tkinter`
-- Prueba `python -m tkinter`
-
----
-
-## 12) Registro y logs
-
-- Log principal: `logs/eda.log`
-- Incluye arranque, errores, acciones y evolución
-
----
-
-## 13) Ejecución rápida para Eric
-
-```bash
-pip install -r requirements.txt
-python main.py
-```
-
-Listo: E.D.A. inicia GUI y queda operativo inmediatamente.
-
----
-
-## 14) Preparar para GitHub
-
-Este proyecto ya incluye `.gitignore` para excluir elementos locales/no versionables:
-- Entornos virtuales (`venv312/`, `.venv/`)
-- Logs, exports, backups y capturas
-- Estado local (`memory/*.json`)
-
-Archivos plantilla incluidos para memoria:
-- `memory/memoria.example.json`
-- `memory/bluetooth_devices.example.json`
-- `memory/solutions_cache.example.json`
-
-Flujo recomendado:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
-git add .
-git commit -m "prepare project for github"
+git add -A
+git commit -m "Tu mensaje"
+git push origin main
 ```
 
----
+## Licencia
 
-## 15) Instalación completa (desde cero)
-
-Guía recomendada para Windows 10/11, paso a paso.
-
-### 15.1 Instalar herramientas base
-1. Instala Python 3.12+ desde [python.org](https://www.python.org/downloads/).
-   - Marca la opción **Add Python to PATH** durante la instalación.
-2. Verifica instalación:
-   ```bash
-   python --version
-   pip --version
-   ```
-3. (Opcional pero recomendado) Instala Git desde [git-scm.com](https://git-scm.com/download/win).
-4. Instala Ollama desde [ollama.com](https://ollama.com/download).
-
-### 15.2 Descargar proyecto y crear entorno virtual
-En terminal, dentro de la carpeta donde quieras trabajar:
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-```
-
-### 15.3 Instalar dependencias
-Con el entorno activado:
-```bash
-pip install -r requirements.txt
-```
-
-### 15.4 Configurar Ollama
-```bash
-ollama pull llama3.2:1b
-ollama serve
-```
-En otra terminal:
-```bash
-ollama list
-```
-
-### 15.5 Verificación rápida
-```bash
-python health_check.py
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-### 15.6 Ejecutar E.D.A.
-```bash
-python main.py
-```
-
-Si algo falla:
-- revisa `logs/eda.log`
-- revisa sección `11) Troubleshooting`
-
----
-
+Ver archivo `LICENSE` en la raíz del proyecto.
