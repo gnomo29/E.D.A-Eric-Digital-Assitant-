@@ -25,7 +25,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-**Windows sin terminal:** `scripts/windows/Iniciar_EDA.bat` (espera `venv312` en la raíz) o `INSTALAR_EDA.cmd` para instalación guiada.
+**Windows — instalación automática:** con **`scripts/windows/INSTALAR_EDA.cmd`** podés instalar **todo de una vez**: comprueba **Python 3.12** (`py -3.12`), recrea el entorno **`venv312`**, instala **`requirements.txt`**, intenta **PyAudio** (pipwin / pip) y al final puede lanzar la GUI. Ejecutalo con doble clic o desde `cmd` en la raíz del repo. Para el día a día, **`scripts/windows/Iniciar_EDA.bat`** solo activa `venv312` y arranca `python main.py` (Ollama se intenta en segundo plano).
 
 **CLI de prueba:** `python main.py --cli`
 
