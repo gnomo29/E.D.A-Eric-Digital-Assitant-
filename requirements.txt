@@ -1,5 +1,9 @@
 pipwin; platform_system == "Windows"
+# Red y certificados (evita errores HTTPS intermitentes; requests ya las usa; fijamos versiones mínimas)
 requests>=2.32.0
+urllib3>=2.2.0
+certifi>=2024.2.2
+charset-normalizer>=3.3.0
 beautifulsoup4>=4.12.3
 ollama>=0.3.3
 pyttsx3>=2.90
@@ -9,6 +13,9 @@ pyautogui>=0.9.54
 pygetwindow>=0.0.9
 psutil>=5.9.8
 pycaw>=20240210; platform_system == "Windows"
+comtypes>=1.4.1; platform_system == "Windows"
+# pywin32: opcional pero útil en Windows para integración Win32/COM con algunas herramientas y pyttsx3
+pywin32>=306; platform_system == "Windows"
 screen-brightness-control>=0.24.2
 bleak>=0.22.3
 pyperclip>=1.9.0

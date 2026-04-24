@@ -6,6 +6,7 @@ import getpass
 import glob
 import os
 import re
+import shutil
 import subprocess
 import time
 import webbrowser
@@ -39,6 +40,20 @@ try:
         AudioUtilities = None
 except Exception:
     AudioUtilities = None
+
+
+def _win_keybd_volume_pulse(vk: int, presses: int) -> None:
+    """Pulsa teclas de volumen del sistema (Windows). ~2 %% por paso en muchos equipos."""
+    if os.name != "nt" or presses <= 0:
+        return
+    try:
+        import ctypes
+
+        for _ in range(presses):
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+    except Exception as exc:
+        log.debug("keybd volumen no disponible: %s", exc)
 
 
 class ActionController:
@@ -116,7 +131,7 @@ class ActionController:
         flags=re.IGNORECASE,
     )
     SPOTIFY_PLAY_FALLBACK_REGEX = re.compile(
-        r"^\s*(?:reproduce|pon|ponme)\s+(.+?)\s*$",
+        r"^\s*(?:reproduce|reproducir|reproduzca|reprodusca|pon|ponme)\s+(.+?)\s*$",
         flags=re.IGNORECASE,
     )
     STEAM_COMMAND_REGEX = re.compile(
@@ -127,6 +142,9 @@ class ActionController:
     def __init__(self, confirm_callback: Callable[[str], bool] | None = None) -> None:
         self.confirm_callback = confirm_callback
         self.platform = detect_platform()
+        # Caché simple para reducir búsquedas costosas repetidas.
+        self._app_path_cache: Dict[str, str] = {}
+        self._start_app_id_cache: Dict[str, str] = {}
 
     def _confirm(self, message: str) -> bool:
         if not config.REQUIRE_CONFIRMATION_CRITICAL:
@@ -223,6 +241,10 @@ class ActionController:
         normalized = app_name.strip().lower().removesuffix(".exe")
         username = os.environ.get("USERNAME") or getpass.getuser() or ""
 
+        cached = self._app_path_cache.get(normalized)
+        if cached and os.path.isfile(cached):
+            return cached
+
         def time_left() -> float:
             return timeout_seconds - (time.monotonic() - started_at)
 
@@ -249,9 +271,11 @@ class ActionController:
                     if matches:
                         selected = matches[0]
                         log.info("[APP_SEARCH] Encontrado en ruta conocida con glob: %s", selected)
+                        self._app_path_cache[normalized] = selected
                         return selected
                 elif exists_file(resolved):
                     log.info("[APP_SEARCH] Encontrado en ruta conocida: %s", resolved)
+                    self._app_path_cache[normalized] = resolved
                     return resolved
 
         # 2) Búsqueda automática en ubicaciones comunes de Windows (máx. 2-3 niveles)
@@ -295,6 +319,7 @@ class ActionController:
                                 depth,
                                 selected,
                             )
+                            self._app_path_cache[normalized] = selected
                             return selected
 
         # 3) Último recurso: comando where de Windows
@@ -323,11 +348,44 @@ class ActionController:
                         candidate = line.strip()
                         if exists_file(candidate):
                             log.info("[APP_SEARCH] Encontrado con 'where': %s", candidate)
+                            self._app_path_cache[normalized] = candidate
                             return candidate
             except Exception as exc:
                 log.debug("[APP_SEARCH] Falló 'where %s': %s", where_target, exc)
 
         log.warning("[APP_SEARCH] No se encontró ruta para '%s' en %.2fs", normalized, time.monotonic() - started_at)
+        return None
+
+    def _find_start_menu_app_id(self, app_name: str) -> str | None:
+        """Intenta encontrar AppID de Windows Start Menu (UWP/Store apps)."""
+        if not self.platform.startswith("win"):
+            return None
+        normalized = (app_name or "").strip().lower()
+        if not normalized:
+            return None
+        cached = self._start_app_id_cache.get(normalized)
+        if cached:
+            return cached
+        try:
+            ps_cmd = (
+                "$n='" + normalized.replace("'", "''") + "'; "
+                "Get-StartApps | Where-Object { $_.Name -like \"*$n*\" -or $_.AppID -like \"*$n*\" } | "
+                "Select-Object -First 1 -ExpandProperty AppID"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+            app_id = (result.stdout or "").strip().splitlines()
+            if app_id:
+                selected = app_id[0].strip()
+                self._start_app_id_cache[normalized] = selected
+                return selected
+        except Exception as exc:
+            log.debug("[APP_SEARCH] No pude resolver AppID de Start Menu para '%s': %s", app_name, exc)
         return None
     
     def open_app(self, app_name: str) -> Dict[str, str]:
@@ -344,18 +402,29 @@ class ActionController:
                     # Usar start para aplicaciones del sistema
                     subprocess.Popen(f"start {normalized}", shell=True)
                     return {"status": "ok", "message": f"Abriendo {normalized}."}
-                
-                # Buscar ruta completa para otras aplicaciones
+
+                # 1) Buscar ruta completa para aplicaciones conocidas/no conocidas
                 app_path = self._find_app_path(normalized)
-                
                 if app_path:
-                    # Abrir con ruta completa
                     subprocess.Popen([app_path], shell=False)
                     return {"status": "ok", "message": f"Abriendo {normalized}."}
-                else:
-                    # Intentar con start como último recurso
-                    subprocess.Popen(f"start {normalized}", shell=True)
-                    return {"status": "ok", "message": f"Intentando abrir {normalized}."}
+
+                # 2) Probar ejecutable en PATH
+                for candidate in (normalized, f"{normalized}.exe"):
+                    resolved = shutil.which(candidate)
+                    if resolved:
+                        subprocess.Popen([resolved], shell=False)
+                        return {"status": "ok", "message": f"Abriendo {normalized}."}
+
+                # 3) Probar Start Menu/UWP por AppID
+                app_id = self._find_start_menu_app_id(normalized)
+                if app_id:
+                    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{app_id}"], shell=False)
+                    return {"status": "ok", "message": f"Abriendo {normalized}."}
+
+                # 4) Último recurso: start nativo de Windows
+                subprocess.Popen(f"start {normalized}", shell=True)
+                return {"status": "ok", "message": f"Intentando abrir {normalized}."}
                     
             elif self.platform == "darwin":
                 subprocess.Popen(["open", "-a", normalized])
@@ -457,9 +526,19 @@ class ActionController:
         if not match:
             return ""
         query = match.group(1).strip(" \t\n\r.,;:!?¡¿\"'")
-        # Limpieza de palabras vacías comunes
+        # Limpieza de palabras vacías comunes sin perder intención.
+        query = re.sub(r"^canci\S*\s+de\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"^canci\S*\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"^(?:la|el|una|un)\s+canci.n\s+de\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"^(?:la|el|una|un)\s+canci.n\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"^(?:la|el|una|un)\s+(?:cancion|canción|tema|musica|música)\s+de\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"^(?:la|el|una|un)\s+(?:cancion|canción|tema|musica|música)\s+", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"\bcanci.n\b", " ", query, flags=re.IGNORECASE)
         query = re.sub(r"\b(cancion|canción|tema|musica|música)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"^de\s+", "", query, flags=re.IGNORECASE)
         query = re.sub(r"\s+", " ", query).strip()
+        if len(query) < 2:
+            return ""
         return query
 
     def _extract_first_youtube_video_url(self, query: str) -> str:
@@ -545,6 +624,23 @@ class ActionController:
 
         return None
 
+    def _set_volume_windows_keybd_approx(self, target_percent: int) -> Dict[str, str]:
+        """Fallback si pycaw/comtypes falla: bajar y subir con teclas multimedia."""
+        safe = max(0, min(100, int(target_percent)))
+        VK_VOLUME_DOWN = 0xAE
+        VK_VOLUME_UP = 0xAF
+        _win_keybd_volume_pulse(VK_VOLUME_DOWN, 55)
+        time.sleep(0.08)
+        steps_up = max(0, min(55, int(round(safe / 2.0))))
+        _win_keybd_volume_pulse(VK_VOLUME_UP, steps_up)
+        return {
+            "status": "ok",
+            "message": (
+                f"Volumen aproximado a ~{safe}% (teclas multimedia). "
+                "Para ajuste exacto instale dependencias: pip install comtypes pycaw"
+            ),
+        }
+
     def set_volume(self, percent: int) -> Dict[str, str]:
         """Ajusta volumen del sistema (multiplataforma con fallback)."""
         safe_percent = max(0, min(100, int(percent)))
@@ -556,12 +652,19 @@ class ActionController:
                 volume.SetMasterVolumeLevelScalar(safe_percent / 100, None)
                 return {"status": "ok", "message": f"Volumen ajustado a {safe_percent}%"}
 
+            if self.platform.startswith("win"):
+                log.warning("Audio API no disponible; usando teclas de volumen")
+                return self._set_volume_windows_keybd_approx(safe_percent)
+
             if self.platform == "linux":
                 subprocess.run(["amixer", "-D", "pulse", "sset", "Master", f"{safe_percent}%"], check=False)
                 return {"status": "ok", "message": f"Volumen ajustado a {safe_percent}%"}
 
             return {"status": "error", "message": "Control de volumen no disponible en este entorno"}
         except Exception as exc:
+            log.warning("set_volume pycaw falló (%s); intentando teclas", exc)
+            if self.platform.startswith("win"):
+                return self._set_volume_windows_keybd_approx(safe_percent)
             return {"status": "error", "message": str(exc)}
 
     def get_volume(self) -> Dict[str, str]:
@@ -578,16 +681,33 @@ class ActionController:
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
+    def _adjust_volume_windows_keybd(self, delta: int) -> Dict[str, str]:
+        """Sube/baja con teclas VK_VOLUME_UP/DOWN cuando no hay lectura de nivel."""
+        d = int(delta)
+        if d == 0:
+            return {"status": "ok", "message": "Sin cambio de volumen."}
+        vk = 0xAF if d > 0 else 0xAE
+        steps = max(1, min(28, abs(d) // 2 + 1))
+        _win_keybd_volume_pulse(vk, steps)
+        return {"status": "ok", "message": f"Volumen ajustado en ~{steps} pasos ({'+' if d > 0 else '-'})."}
+
     def adjust_volume(self, delta: int) -> Dict[str, str]:
         """Sube/baja volumen relativo al valor actual."""
         current = self.get_volume()
         if current.get("status") != "ok":
+            if self.platform.startswith("win"):
+                return self._adjust_volume_windows_keybd(int(delta))
             return current
         try:
             current_value = int(current.get("volume", "0"))
         except ValueError:
             current_value = 0
-        return self.set_volume(current_value + int(delta))
+        result = self.set_volume(current_value + int(delta))
+        if result.get("status") == "ok":
+            return result
+        if self.platform.startswith("win"):
+            return self._adjust_volume_windows_keybd(int(delta))
+        return result
 
     def set_mute(self, muted: bool) -> Dict[str, str]:
         """Activa/desactiva mute del sistema."""
@@ -600,8 +720,22 @@ class ActionController:
                 if muted:
                     return {"status": "ok", "message": "Audio silenciado."}
                 return {"status": "ok", "message": "Audio reactivado."}
+            if self.platform.startswith("win"):
+                if muted:
+                    _win_keybd_volume_pulse(0xAD, 1)
+                    return {"status": "ok", "message": "Pulsé la tecla silenciar del sistema (alterna mute)."}
+                return {
+                    "status": "error",
+                    "message": "Para desmutear con precisión hace falta la API de audio (pip install comtypes pycaw).",
+                }
             return {"status": "error", "message": "Mute no disponible en este entorno"}
         except Exception as exc:
+            if self.platform.startswith("win") and muted:
+                try:
+                    _win_keybd_volume_pulse(0xAD, 1)
+                    return {"status": "ok", "message": "Pulsé silenciar (fallback tras error de API)."}
+                except Exception:
+                    pass
             return {"status": "error", "message": str(exc)}
 
     def set_brightness(self, percent: int) -> Dict[str, str]:

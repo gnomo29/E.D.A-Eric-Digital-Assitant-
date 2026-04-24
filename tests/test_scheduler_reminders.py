@@ -5,6 +5,13 @@ from scheduler import ReminderScheduler, parse_reminder_request
 
 
 class SchedulerReminderTests(unittest.TestCase):
+    def test_parse_reminder_allows_apagar_in_future_message(self) -> None:
+        """El recordatorio describe una acción futura; debe parsearse aunque diga 'apagar'."""
+        req = parse_reminder_request("recuérdame pedirte apagar la música en un minuto")
+        self.assertIsNotNone(req)
+        self.assertEqual(req.mode, "relative")
+        self.assertIn("apagar", (req.message or "").lower())
+
     def test_parse_relative_one_hour(self) -> None:
         now = datetime(2026, 4, 23, 14, 0, 0)
         req = parse_reminder_request("recuérdame en una hora de empezar mi proyecto", now=now)

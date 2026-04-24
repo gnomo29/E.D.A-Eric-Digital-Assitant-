@@ -30,7 +30,10 @@ Esta guia te dice, en palabras simples, que hace cada modulo y que debes hacer a
 - **Evita:** logica pesada dentro de callbacks; mejor delegar a otros modulos.
 
 ### `core.py`
-- **Que hace:** crea prompts y consulta IA (Ollama) con fallback.
+- **Que hace:** crea prompts y consulta IA (Ollama) con fallback; decide si una
+  frase es “tipo investigación web” (`is_research_like_query`) sin confundir
+  órdenes con signos de interrogación (p. ej. “¿abre Chrome?”) con preguntas
+  de conocimiento.
 - **Que hacer aqui:** mejorar calidad de respuestas, prompt y reglas de fallback.
 - **Evita:** automatizacion del sistema (eso va en `actions.py`).
 
@@ -54,8 +57,11 @@ Esta guia te dice, en palabras simples, que hace cada modulo y que debes hacer a
 - **Evita:** logica de negocio.
 
 ### `nlp_utils.py`
-- **Que hace:** interpreta intenciones del usuario.
-- **Que hacer aqui:** nuevos patrones de intencion y entidades.
+- **Que hace:** interpreta intenciones del usuario (`parse_command` → intent +
+  entity). Patrones como `search_web` y `arduino_help` capturan el resto del
+  texto en `entity` (grupo 2 del regex), no solo la palabra clave.
+- **Que hacer aqui:** nuevos patrones de intencion y entidades; mantener al
+  menos dos grupos de captura cuando necesites payload despues del verbo.
 
 ### `web_search.py` y `web_solver.py`
 - **Que hacen:** busqueda y resolucion tecnica en web.
@@ -72,6 +78,22 @@ Esta guia te dice, en palabras simples, que hace cada modulo y que debes hacer a
 ### `bluetooth_manager.py`
 - **Que hace:** escaneo y acciones Bluetooth.
 - **Que hacer aqui:** conectar/desconectar con manejo robusto de errores.
+
+### `obs_controller.py` e `integration_hub.py`
+- **Que hacen:** control de OBS por WebSocket y resumen de integraciones.
+- **Que hacer aqui:** credenciales en `config.py`; no exponer contrasenas en logs.
+
+### `objective_planner.py`
+- **Que hace:** desglose de objetivos en pasos ejecutables desde la GUI.
+- **Que hacer aqui:** pasos claros y verificables.
+
+### `multimodal.py`
+- **Que hace:** contexto extra (portapapeles, capturas) para `core.ask`.
+- **Que hacer aqui:** limitar tamano de contexto y sanitizar texto.
+
+### `skills_auto.py` y `security_levels.py`
+- **Que hacen:** plantillas de autoaprendizaje y reglas de riesgo por nivel.
+- **Que hacer aqui:** revisar con cuidado antes de aflojar seguridad.
 
 ### `system_info.py`
 - **Que hace:** metricas del sistema (CPU, RAM, etc.).

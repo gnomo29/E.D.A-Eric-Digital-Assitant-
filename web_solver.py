@@ -187,6 +187,79 @@ class WebSolver:
             "    }\n"
         )
 
+    def _build_capability_template(self, task_text: str, function_name: str) -> str:
+        """Plantillas funcionales para habilidades comunes solicitadas por el usuario."""
+        normalized = (task_text or "").lower()
+
+        if "bluetooth" in normalized:
+            return (
+                f"def {function_name}(command_text: str = \"\") -> dict:\n"
+                "    \"\"\"Escanea dispositivos Bluetooth cercanos.\"\"\"\n"
+                "    try:\n"
+                "        from bluetooth_manager import BluetoothManager\n"
+                "        bt = BluetoothManager()\n"
+                "        devices = bt.scan_devices(timeout=6)\n"
+                "        if not devices:\n"
+                "            return {\n"
+                "                'status': 'ok',\n"
+                "                'message': 'No detecté dispositivos Bluetooth en este momento.',\n"
+                "            }\n"
+                "        names = [d.get('name', 'Desconocido') for d in devices[:5]]\n"
+                "        joined = ', '.join(names)\n"
+                "        return {\n"
+                "            'status': 'ok',\n"
+                "            'message': f'Detecté dispositivos Bluetooth: {joined}.',\n"
+                "        }\n"
+                "    except Exception as exc:\n"
+                "        return {'status': 'error', 'message': f'Error Bluetooth: {exc}'}\n"
+            )
+
+        if "camara" in normalized or "cámara" in normalized:
+            return (
+                f"def {function_name}(command_text: str = \"\") -> dict:\n"
+                "    \"\"\"Abre la cámara del sistema (Windows).\"\"\"\n"
+                "    try:\n"
+                "        import os\n"
+                "        import subprocess\n"
+                "        if os.name == 'nt':\n"
+                "            subprocess.Popen('start microsoft.windows.camera:', shell=True)\n"
+                "            return {'status': 'ok', 'message': 'Abriendo la cámara del sistema.'}\n"
+                "        return {'status': 'error', 'message': 'Apertura de cámara no implementada para este sistema.'}\n"
+                "    except Exception as exc:\n"
+                "        return {'status': 'error', 'message': f'No pude abrir la cámara: {exc}'}\n"
+            )
+
+        if "usb" in normalized:
+            return (
+                f"def {function_name}(command_text: str = \"\") -> dict:\n"
+                "    \"\"\"Lista dispositivos USB conectados usando ActionController.\"\"\"\n"
+                "    try:\n"
+                "        from actions import ActionController\n"
+                "        ac = ActionController()\n"
+                "        result = ac.list_usb_devices()\n"
+                "        if result.get('status') != 'ok':\n"
+                "            return {'status': 'error', 'message': result.get('message', 'Error USB')}\n"
+                "        devices = result.get('devices', [])\n"
+                "        if not devices:\n"
+                "            return {'status': 'ok', 'message': 'No se detectaron USB conectados.'}\n"
+                "        preview = ', '.join(str(d) for d in devices[:6])\n"
+                "        return {'status': 'ok', 'message': f'USB detectados: {preview}'}\n"
+                "    except Exception as exc:\n"
+                "        return {'status': 'error', 'message': f'No pude listar USB: {exc}'}\n"
+            )
+
+        return ""
+
+    def _is_placeholder_autolearn(self, code: str) -> bool:
+        """Detecta código genérico sin implementación real."""
+        normalized = (code or "").lower()
+        placeholder_markers = (
+            "acción aprendida ejecutada para",
+            "accion aprendida ejecutada para",
+            "implementa aquí la solución",
+        )
+        return any(marker in normalized for marker in placeholder_markers)
+
     def _build_function_name(self, task_text: str) -> str:
         words = re.findall(r"[a-zA-Z0-9áéíóúñ]+", (task_text or "").lower())
         base = "_".join(words[:4]) or "new_skill"
@@ -261,6 +334,20 @@ class WebSolver:
         target_module = self.choose_target_module(clean_task, intent=intent)
         function_name = self._build_function_name(clean_task)
 
+        # Atajo funcional para capacidades comunes solicitadas frecuentemente.
+        capability_template = self._build_capability_template(clean_task, function_name)
+        if capability_template:
+            libraries = self._identify_libraries(capability_template)
+            return {
+                "status": "ok",
+                "task": clean_task,
+                "module": target_module,
+                "function": function_name,
+                "code": capability_template,
+                "libraries": libraries,
+                "sources": [],
+            }
+
         log.info("[AUTO_LEARN] Investigando tarea: %s", clean_task)
         resources = self.search_learning_resources(clean_task)
 
@@ -300,6 +387,12 @@ class WebSolver:
 
         if not generated_code.startswith("def ") or function_name not in generated_code:
             generated_code = self._default_autolearn_function(function_name, clean_task)
+
+        if self._is_placeholder_autolearn(generated_code):
+            return {
+                "status": "error",
+                "message": "La propuesta generada fue demasiado genérica; necesito una instrucción más concreta para aprenderlo bien.",
+            }
 
         if not self._is_safe_python_code(generated_code):
             return {"status": "error", "message": "Código generado rechazado por política de seguridad."}

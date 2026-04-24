@@ -39,7 +39,7 @@ class VoiceEngine:
         self._speak_queue: "queue.Queue[str]" = queue.Queue()
         self._speak_lock = threading.Lock()
         self._speak_count = 0  # Contador para reiniciar el motor
-        self._max_speaks_before_reset = 10  # Reiniciar cada 10 mensajes
+        self._max_speaks_before_reset = 80  # pyttsx3 se estabiliza mejor con reinicios menos frecuentes
 
         self._init_tts()
         self._init_stt()
@@ -111,6 +111,7 @@ class VoiceEngine:
                     self._engine.setProperty("voice", voice.id)
                     break
             
+            self.tts_available = True
             log.info("Motor TTS reiniciado correctamente")
         except Exception as exc:
             log.error("Error al reiniciar TTS: %s", exc)
@@ -118,9 +119,13 @@ class VoiceEngine:
             self.tts_available = False
 
     def _speak_now(self, text: str) -> None:
-        if not self.enabled or not self.tts_available:
+        if not self.enabled:
             return
-        
+        if not self.tts_available or self._engine is None:
+            self._reinit_tts_engine()
+        if not self.tts_available or self._engine is None:
+            return
+
         try:
             # Reiniciar motor cada cierto número de mensajes para evitar bloqueos
             self._speak_count += 1
@@ -158,8 +163,10 @@ class VoiceEngine:
 
     def speak(self, text: str) -> None:
         """Encola texto para hablar sin bloquear GUI."""
-        if not text:
+        if not text or not self.enabled:
             return
+        if not self.tts_available:
+            self._reinit_tts_engine()
         self._speak_queue.put(text)
 
     def _contains_wake_word(self, text: str) -> bool:

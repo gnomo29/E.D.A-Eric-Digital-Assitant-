@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List
+import concurrent.futures
+from typing import Any, Dict, List
 
 from logger import get_logger
 from memory import MemoryManager
@@ -22,7 +23,7 @@ class BluetoothManager:
 
     def __init__(self) -> None:
         self.memory = MemoryManager()
-        self._active_clients: Dict[str, BleakClient] = {}
+        self._active_clients: Dict[str, Any] = {}
 
     @property
     def available(self) -> bool:
@@ -50,12 +51,17 @@ class BluetoothManager:
         return parsed
 
     def scan_devices(self, timeout: int = 6) -> List[Dict[str, str]]:
-        """Versión síncrona para GUI."""
-        try:
+        """Versión síncrona para GUI (hilo aparte: evita conflicto con event loop de Tkinter)."""
+        if not self.available:
+            return []
+
+        def _runner() -> List[Dict[str, str]]:
             return asyncio.run(self.scan_devices_async(timeout=timeout))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self.scan_devices_async(timeout=timeout))
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(_runner)
+                return fut.result(timeout=max(35.0, float(timeout) + 28.0))
         except Exception as exc:
             log.error("Error escaneando bluetooth: %s", exc)
             return []
@@ -75,11 +81,15 @@ class BluetoothManager:
             return False
 
     def connect(self, address: str) -> bool:
-        try:
+        if not self.available:
+            return False
+
+        def _runner() -> bool:
             return asyncio.run(self.connect_async(address))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self.connect_async(address))
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_runner).result(timeout=45.0)
         except Exception:
             return False
 
@@ -96,11 +106,15 @@ class BluetoothManager:
             return False
 
     def disconnect(self, address: str) -> bool:
-        try:
+        if not self.available:
+            return True
+
+        def _runner() -> bool:
             return asyncio.run(self.disconnect_async(address))
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self.disconnect_async(address))
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_runner).result(timeout=30.0)
         except Exception:
             return False
 

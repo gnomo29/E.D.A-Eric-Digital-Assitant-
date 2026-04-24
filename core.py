@@ -47,6 +47,14 @@ class EDACore:
         flags=re.IGNORECASE,
     )
 
+    # No confundir preguntas con órdenes: "¿abre chrome?" no debe forzar modo investigación.
+    _COMMANDISH_START = re.compile(
+        r"^\s*(?:abre|abrir|cierra|cerrar|reproduce|reproducir|pon|ponme|busca|buscar|búscame|buscame|"
+        r"googlea|googleame|mutea|desmutea|silencia|silenciar|sube|baja|volumen|brillo|investiga|investigame|investígame|"
+        r"recuerdame|recuérdame|recordatorio|entra|entrar|objetivo|planifica|planificar|evoluciona|autoevoluciona)\b",
+        flags=re.IGNORECASE,
+    )
+
     LOW_QUALITY_PHRASES = (
         "no sé",
         "no se",
@@ -119,7 +127,7 @@ class EDACore:
     def _derive_knowledge_topic(query: str) -> str:
         normalized = re.sub(r"[^\w\sáéíóúñÁÉÍÓÚÑ]", " ", query.lower())
         normalized = re.sub(
-            r"\b(investiga|investigame|investigame|sobre|acerca|de|la|el|los|las|quien|quienes|es|biografia|hablame|dime|que|por favor)\b",
+            r"\b(investiga|investigame|investígame|sobre|acerca|de|la|el|los|las|quien|quienes|es|biografia|hablame|dime|que|por favor)\b",
             " ",
             normalized,
         )
@@ -175,6 +183,10 @@ class EDACore:
         """Detecta preguntas de conocimiento general sin comando explícito."""
         cleaned = (message or "").strip()
         if len(cleaned) < 3:
+            return False
+        without_opening_punct = re.sub(r"^[¿?¡!]+", "", cleaned).strip()
+        probe = without_opening_punct or cleaned
+        if self._COMMANDISH_START.search(probe):
             return False
         if self.extract_investigation_query(cleaned):
             return True
@@ -269,10 +281,17 @@ class EDACore:
             return next(iter(available))
         return self.model
 
-    def build_prompt(self, message: str, history: List[Dict[str, str]] | None = None) -> str:
+    def build_prompt(
+        self,
+        message: str,
+        history: List[Dict[str, str]] | None = None,
+        extra_context: str = "",
+    ) -> str:
         """Construye prompt final con historial breve."""
         history = history or []
         lines = [f"Sistema: {self.system_prompt}"]
+        if extra_context.strip():
+            lines.append(f"Contexto del entorno: {extra_context.strip()}")
         for item in history[-10:]:
             role = str(item.get("role", "")).strip().lower()
             if role in {"user", "assistant"}:
@@ -345,7 +364,23 @@ class EDACore:
     def should_activate_auto_learn(self, user_message: str, candidate_answer: str) -> bool:
         """Decide si corresponde activar AUTO_LEARN según mensaje/respuesta."""
         msg = (user_message or "").strip()
-        if len(msg) < 3:
+        if len(msg) < 8:
+            return False
+        trivial = {
+            "habla",
+            "hola",
+            "gracias",
+            "ok",
+            "vale",
+            "si",
+            "sí",
+            "no",
+            "calla",
+            "silencio",
+            "adios",
+            "adiós",
+        }
+        if msg.lower().strip() in trivial:
             return False
         return self.detect_incapability(candidate_answer)
 
@@ -367,7 +402,7 @@ class EDACore:
             log.error("[WEB_SEARCH] Error en fallback de búsqueda: %s", exc)
             return "Según mi búsqueda en línea, hubo un problema temporal al consultar la web."
 
-    def ask(self, message: str, history: List[Dict[str, str]] | None = None) -> str:
+    def ask(self, message: str, history: List[Dict[str, str]] | None = None, extra_context: str = "") -> str:
         """Consulta al modelo local y retorna texto."""
         started_at = time.perf_counter()
 
@@ -380,7 +415,7 @@ class EDACore:
         if handled_search:
             return _finish(search_answer, "search_command")
 
-        prompt = self.build_prompt(message, history)
+        prompt = self.build_prompt(message, history, extra_context=extra_context)
 
         if not self.is_ollama_alive():
             # Sin Ollama, intentamos fallback web automático antes de degradar totalmente.

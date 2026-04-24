@@ -24,10 +24,10 @@ class ParsedCommand:
 INTENT_PATTERNS: Dict[str, str] = {
     "open_app": r"\b(abrir|abre|inicia|ejecuta)\s+(.+)",
     "close_app": r"\b(cerrar|cierra|termina|finaliza)\s+(.+)",
-    "search_web": r"\b(busca|investiga|consulta|resuelve)\b",
+    "search_web": r"\b(busca|investiga|consulta|resuelve)\b\s*(.*)",
     "system_info": r"\b(cpu|ram|estado del sistema|temperatura|hora|fecha)\b",
     "optimize": r"\b(optimiza|limpia|acelera|mantenimiento)\b",
-    "arduino_help": r"\b(arduino|led|millis|sensor|sketch|\.ino)\b",
+    "arduino_help": r"\b(arduino|led|millis|sensor|sketch|\.ino)\b\s*(.*)",
     "file_create": r"\b(crea archivo|nuevo archivo)\b",
     "bluetooth": r"\b(bluetooth|emparejar|dispositivo)\b",
     "remember": r"\b(recuerda|memoriza)\s+(.+)",
@@ -67,6 +67,15 @@ def detect_secondary_action(text: str) -> tuple[str, str]:
 def normalize_text(text: str) -> str:
     """Normaliza texto para análisis ligero."""
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def normalize_learned_trigger_key(text: str) -> str:
+    """
+    Normaliza gatillos de automatización para coincidir con la misma clave
+    al aprender y al ejecutar (puntuación, mayúsculas).
+    """
+    cleaned = re.sub(r"[¿?¡!.,;:\"'()\[\]]", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def parse_command(text: str) -> ParsedCommand:

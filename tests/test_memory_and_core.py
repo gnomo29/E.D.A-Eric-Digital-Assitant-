@@ -60,6 +60,36 @@ class MemoryAndCoreTests(unittest.TestCase):
                 self.assertTrue(memory.remember("web_url::youtube", "https://www.youtube.com"))
                 self.assertEqual(memory.recall("web_url::youtube"), "https://www.youtube.com")
 
+    def test_forget_learned_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with (
+                patch.object(config, "MEMORY_FILE", base / "memoria.json"),
+                patch.object(config, "BT_MEMORY_FILE", base / "bluetooth_devices.json"),
+                patch.object(config, "SOLUTIONS_CACHE_FILE", base / "solutions_cache.json"),
+            ):
+                memory = MemoryManager()
+                memory.save_learned_skill("abrir obs", "abre obs", "actions.py", "open_app")
+                self.assertTrue(memory.forget_learned_skill("abrir obs"))
+                skills = memory.get_learned_skills()
+                self.assertEqual(skills, {})
+
+    def test_learned_commands_support_multiple_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with (
+                patch.object(config, "MEMORY_FILE", base / "memoria.json"),
+                patch.object(config, "BT_MEMORY_FILE", base / "bluetooth_devices.json"),
+                patch.object(config, "SOLUTIONS_CACHE_FILE", base / "solutions_cache.json"),
+            ):
+                memory = MemoryManager()
+                self.assertTrue(memory.learn_command("abre nintendo", "abre obs", append=True))
+                self.assertTrue(memory.learn_command("abre nintendo", "cambia a escena nintendo", append=True))
+                actions = memory.get_learned_actions("abre nintendo")
+                self.assertEqual(len(actions), 2)
+                self.assertIn("abre obs", actions)
+                self.assertIn("cambia a escena nintendo", actions)
+
     def test_build_prompt_accepts_both_history_formats(self) -> None:
         core = EDACore(memory_manager=object())
         history = [
@@ -78,6 +108,19 @@ class MemoryAndCoreTests(unittest.TestCase):
         self.assertTrue(core.is_research_like_query("quien descubrio america"))
         self.assertTrue(core.is_research_like_query("que es un condensador"))
         self.assertFalse(core.is_research_like_query("abre spotify"))
+        self.assertFalse(core.is_research_like_query("abre spotify?"))
+        self.assertFalse(core.is_research_like_query("sube el volumen?"))
+        self.assertFalse(core.is_research_like_query("¿abre chrome?"))
+        self.assertTrue(core.is_research_like_query("¿Qué es un agujero negro?"))
+
+    def test_should_activate_auto_learn_ignores_trivial_phrases(self) -> None:
+        core = EDACore(memory_manager=object())
+        self.assertFalse(
+            core.should_activate_auto_learn("habla", "no puedo hablar en este momento"),
+        )
+        self.assertFalse(
+            core.should_activate_auto_learn("hola", "no puedo ayudarte"),
+        )
 
     @patch("core.webbrowser.open")
     def test_open_browser_for_research(self, mock_open) -> None:
@@ -90,6 +133,30 @@ class MemoryAndCoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(opened), 2)
         self.assertTrue(any("google.com/search" in url for url in opened))
         self.assertTrue(mock_open.called)
+
+    def test_find_learned_skill_rejects_short_substring(self) -> None:
+        """Evita que 're' active una skill cuyo trigger contiene 'aprender'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with (
+                patch.object(config, "MEMORY_FILE", base / "memoria.json"),
+                patch.object(config, "BT_MEMORY_FILE", base / "bluetooth_devices.json"),
+                patch.object(config, "SOLUTIONS_CACHE_FILE", base / "solutions_cache.json"),
+            ):
+                memory = MemoryManager()
+                data = memory.get_memory()
+                data["learned_skills"] = {
+                    "cam": {
+                        "trigger": "aprender a controlar la cámara",
+                        "module": "skills_auto.py",
+                        "function": "learned_aprender_a_controlar_la",
+                    }
+                }
+                memory.save_memory(data)
+                self.assertIsNone(memory.find_learned_skill("re"))
+                hit = memory.find_learned_skill("aprender a controlar la cámara")
+                self.assertIsNotNone(hit)
+                self.assertEqual(hit.get("function"), "learned_aprender_a_controlar_la")
 
 
 if __name__ == "__main__":

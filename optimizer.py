@@ -7,6 +7,36 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, List
+"""
+Cómo guardar los cambios hechos en el proyecto en GitHub:
+
+Pasos básicos por línea de comandos (Git):
+
+1. Abre una terminal en la carpeta del proyecto.
+2. Asegúrate de que tu repositorio está iniciado (ya tienes una carpeta .git). Si no, ejecuta:
+   git init
+
+3. Agrega los archivos modificados para guardar esos cambios:
+   git add .
+
+4. Haz un commit describiendo los cambios:
+   git commit -m "Descripción breve de los cambios realizados"
+
+5. Si ya tienes un repositorio remoto en GitHub y está enlazado, puedes subir así:
+   git push
+
+   Si es la primera vez, enlaza tu repositorio local con el remoto:
+   git remote add origin https://github.com/TU-USUARIO/NOMBRE-REPO.git
+   git push -u origin main   # O 'master', según tu rama principal
+
+Notas:
+- Debes tener configurado tu usuario y email en git (una sola vez):
+  git config --global user.name "Tu Nombre"
+  git config --global user.email "tu@email.com"
+- Si usas autenticación por token de acceso personal, úsalo en lugar de tu contraseña.
+
+También puedes hacer estos pasos desde interfaces gráficas como GitHub Desktop, VS Code o GitKraken.
+"""
 
 try:
     import psutil

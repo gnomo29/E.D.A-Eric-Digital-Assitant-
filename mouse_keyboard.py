@@ -63,3 +63,13 @@ class MouseKeyboardController:
             return {"status": "ok", "message": f"Hotkey ejecutada: {'+'.join(keys)}"}
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
+
+    def press(self, key: str, presses: int = 1, interval: float = 0.08) -> Dict[str, str]:
+        """Pulsa una tecla (p. ej. 'enter', 'space', 'playpause') varias veces."""
+        if not self.available:
+            return {"status": "error", "message": "pyautogui no disponible"}
+        try:
+            pyautogui.press(key, presses=presses, interval=interval)
+            return {"status": "ok", "message": f"Tecla {key} x{presses}"}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from importlib.util import find_spec
 from typing import Dict
 
@@ -14,18 +15,56 @@ def _check_module(module_name: str) -> bool:
     return find_spec(module_name) is not None
 
 
+def _check_windows_audio_stack() -> str:
+    """pycaw requiere comtypes en Windows; sin ellos el volumen falla."""
+    if not sys.platform.startswith("win"):
+        return "n/a"
+    if not _check_module("comtypes"):
+        return "missing_comtypes"
+    if not _check_module("pycaw"):
+        return "missing_pycaw"
+    try:
+        from pycaw.pycaw import AudioUtilities
+
+        devices = AudioUtilities.GetSpeakers()
+        if devices is None:
+            return "no_device"
+        return "ok"
+    except Exception as exc:
+        return f"warn:{exc.__class__.__name__}"
+
+
 def run_health_check() -> Dict[str, str]:
     checks: Dict[str, str] = {}
 
     required_modules = [
         "requests",
+        "urllib3",
+        "certifi",
         "bs4",
         "pyttsx3",
         "speech_recognition",
         "bleak",
+        "pyautogui",
+        "pygetwindow",
+        "PIL",
+        "duckduckgo_search",
+        "obsws_python",
     ]
     for mod in required_modules:
         checks[f"module:{mod}"] = "ok" if _check_module(mod) else "missing"
+
+    optional_modules = [
+        ("comtypes", "Windows audio API"),
+        ("pycaw", "Windows master volume"),
+        ("screen_brightness_control", "Brillo de pantalla"),
+        ("pyperclip", "Portapapeles multimodal"),
+        ("win32api", "pywin32 (Win32 opcional)"),
+    ]
+    for mod, _label in optional_modules:
+        checks[f"optional:{mod}"] = "ok" if _check_module(mod) else "missing"
+
+    checks["windows:audio_stack"] = _check_windows_audio_stack()
 
     try:
         response = requests.get(config.OLLAMA_HEALTH_URL, timeout=3)

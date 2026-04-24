@@ -129,13 +129,23 @@ def parse_reminder_request(text: str, now: Optional[datetime] = None) -> Optiona
         if delta_minutes <= 0:
             return None
 
+        # Cola tras la ventana temporal ("... en 5 min de tomar agua", "... en 20 min que revise").
         tail = normalized[relative_match.end() :].strip(" .,:;")
         if tail.startswith("de "):
             tail = tail[3:].strip()
         elif tail.startswith("que "):
             tail = tail[4:].strip()
 
-        message = tail or "tienes un recordatorio pendiente."
+        # Cuerpo antes de "en ..." ("recuérdame tomar agua en un minuto", "... apagar la música en un minuto").
+        head = normalized[: relative_match.start()].strip()
+        head = re.sub(r"^(?:recuerdame|recordatorio)\b\s*", "", head, flags=re.IGNORECASE).strip()
+
+        if head:
+            message = head.strip(" ,.;:") or "tienes un recordatorio pendiente."
+        elif tail:
+            message = tail
+        else:
+            message = "tienes un recordatorio pendiente."
         remind_at = now + timedelta(minutes=delta_minutes)
         return ReminderRequest(remind_at=remind_at, message=message, original_text=raw, mode="relative")
 

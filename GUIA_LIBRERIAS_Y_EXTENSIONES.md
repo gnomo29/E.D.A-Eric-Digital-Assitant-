@@ -89,13 +89,17 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
   - Captura excepciones de permisos al consultar procesos.
 - **Errores comunes:** asumir acceso total a procesos protegidos.
 
-### `pycaw` (Windows)
-- **Para que sirve:** control de volumen del sistema.
-- **Donde se usa en E.D.A.:** `actions.py` (volumen).
+### `comtypes` + `pycaw` (Windows)
+- **Para que sirve:** `pycaw` controla el volumen maestro por la API de audio
+  de Windows; **`comtypes`** es dependencia necesaria para que `pycaw` funcione
+  (esta en `requirements.txt` y el `health_check.py` marca `windows:audio_stack`).
+- **Donde se usa en E.D.A.:** `actions.py` (volumen; fallback a teclas
+  multimedia si COM falla).
 - **Implementacion recomendada:**
   - Validar rangos de volumen.
   - Fallback cuando COM/audio falle.
-- **Errores comunes:** problemas de backend de audio en sesiones remotas.
+- **Errores comunes:** problemas de backend de audio en sesiones remotas;
+  falta de `comtypes` con error al importar `pycaw`.
 
 ### `screen-brightness-control`
 - **Para que sirve:** control de brillo.

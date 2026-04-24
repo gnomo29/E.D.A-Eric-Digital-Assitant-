@@ -32,7 +32,8 @@ class WebAndActionsTests(unittest.TestCase):
     def test_extract_spotify_play_query_without_platform(self) -> None:
         ac = ActionController()
         self.assertEqual(ac.extract_spotify_play_query("reproduce ironman 2 soundtrack"), "ironman 2 soundtrack")
-        self.assertEqual(ac.extract_spotify_play_query("pon canción de queen"), "de queen")
+        self.assertEqual(ac.extract_spotify_play_query("pon canción de queen"), "queen")
+        self.assertEqual(ac.extract_spotify_play_query("reprodusca bohemian rhapsody"), "bohemian rhapsody")
         self.assertEqual(ac.extract_spotify_play_query("reproduce algo en youtube"), "")
 
     @patch("actions.webbrowser.open")
@@ -51,6 +52,17 @@ class WebAndActionsTests(unittest.TestCase):
         self.assertEqual(parsed_brightness.intent, "brightness")
         self.assertEqual(parsed_mute.intent, "volume")
 
+    def test_parse_command_search_web_and_arduino_capture_tail(self) -> None:
+        busca = parse_command("busca tutoriales de python")
+        self.assertEqual(busca.intent, "search_web")
+        self.assertEqual(busca.entity, "tutoriales de python")
+        consulta = parse_command("consulta el precio del dólar")
+        self.assertEqual(consulta.intent, "search_web")
+        self.assertEqual(consulta.entity, "el precio del dólar")
+        ard = parse_command("arduino serial monitor no abre")
+        self.assertEqual(ard.intent, "arduino_help")
+        self.assertEqual(ard.entity, "serial monitor no abre")
+
     @patch("actions.subprocess.run")
     def test_list_usb_devices_windows(self, mock_run) -> None:
         ac = ActionController()
@@ -67,6 +79,13 @@ class WebAndActionsTests(unittest.TestCase):
         solver = WebSolver()
         self.assertEqual(solver.detect_problem_type("arduino sensor led"), "arduino")
         self.assertEqual(solver.detect_problem_type("python error api"), "programming")
+
+    def test_web_solver_capability_template_bluetooth(self) -> None:
+        solver = WebSolver()
+        payload = solver.generate_autolearn_payload("aprender a conectarte por bluetooth", intent="capability_upgrade")
+        self.assertEqual(payload.get("status"), "ok")
+        code = str(payload.get("code", ""))
+        self.assertIn("BluetoothManager", code)
 
 
 if __name__ == "__main__":

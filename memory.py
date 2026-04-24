@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 import config
 from logger import get_logger
+from nlp_utils import normalize_learned_trigger_key
 from utils import safe_json_load, safe_json_save
 
 log = get_logger("memory")
@@ -21,12 +22,20 @@ DEFAULT_MEMORY: Dict[str, Any] = {
         "voice_enabled": True,
         "theme": "jarvis",
         "model": config.OLLAMA_MODEL,
+        "action_permissions": {
+            "system": True,
+            "web": True,
+            "automation": True,
+            "learning": True,
+        },
     },
     "history": [],
     "chat_history": [],
     "learned_commands": {},
     "learned_skills": {},
     "habits": {},
+    "objectives": [],
+    "objective_history": [],
     "remembered": {},
     "reminders": [],
     "knowledge_base": {},
@@ -88,6 +97,14 @@ class MemoryManager:
         normalized["preferences"].setdefault("voice_enabled", True)
         normalized["preferences"].setdefault("theme", "jarvis")
         normalized["preferences"].setdefault("model", config.OLLAMA_MODEL)
+        action_permissions = normalized["preferences"].get("action_permissions", {})
+        if not isinstance(action_permissions, dict):
+            action_permissions = {}
+        action_permissions.setdefault("system", True)
+        action_permissions.setdefault("web", True)
+        action_permissions.setdefault("automation", True)
+        action_permissions.setdefault("learning", True)
+        normalized["preferences"]["action_permissions"] = action_permissions
 
         if not isinstance(normalized.get("history"), list):
             normalized["history"] = []
@@ -97,6 +114,10 @@ class MemoryManager:
         for key in ("learned_commands", "learned_skills", "habits", "remembered", "knowledge_base"):
             if not isinstance(normalized.get(key), dict):
                 normalized[key] = {}
+        if not isinstance(normalized.get("objectives"), list):
+            normalized["objectives"] = []
+        if not isinstance(normalized.get("objective_history"), list):
+            normalized["objective_history"] = []
         if not isinstance(normalized.get("reminders"), list):
             normalized["reminders"] = []
         if not isinstance(normalized.get("knowledge_order"), list):
@@ -185,17 +206,53 @@ class MemoryManager:
         data["chat_history"] = chat_history[-300:]
         return self.save_memory(data)
 
-    def learn_command(self, trigger: str, action: str) -> bool:
+    def learn_command(self, trigger: str, action: str, append: bool = True) -> bool:
         data = self.get_memory()
         learned = data.get("learned_commands", {})
-        learned[trigger.lower().strip()] = action
+        key = normalize_learned_trigger_key(trigger)
+        new_action = (action or "").strip()
+        if not key or not new_action:
+            return False
+
+        current = learned.get(key)
+        if current is None:
+            learned[key] = [new_action]
+        else:
+            if isinstance(current, list):
+                actions = current
+            elif isinstance(current, str):
+                actions = [current]
+            else:
+                actions = []
+
+            if append:
+                if new_action not in actions:
+                    actions.append(new_action)
+            else:
+                actions = [new_action]
+            learned[key] = actions
+
         data["learned_commands"] = learned
-        log.info("Nuevo aprendizaje guardado: %s -> %s", trigger, action)
+        log.info("Nuevo aprendizaje guardado: %s -> %s", trigger, new_action)
         return self.save_memory(data)
 
     def get_learned_action(self, trigger: str) -> str | None:
         data = self.get_memory()
-        return data.get("learned_commands", {}).get(trigger.lower().strip())
+        value = data.get("learned_commands", {}).get(normalize_learned_trigger_key(trigger))
+        if isinstance(value, list) and value:
+            return str(value[0])
+        if isinstance(value, str):
+            return value
+        return None
+
+    def get_learned_actions(self, trigger: str) -> List[str]:
+        data = self.get_memory()
+        value = data.get("learned_commands", {}).get(normalize_learned_trigger_key(trigger))
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
 
     def save_learned_skill(self, skill_name: str, trigger: str, module: str, function_name: str) -> bool:
         """Guarda habilidad aprendida para reutilización futura."""
@@ -216,6 +273,19 @@ class MemoryManager:
         data = self.get_memory()
         return data.get("learned_skills", {})
 
+    def forget_learned_skill(self, skill_name: str) -> bool:
+        """Elimina una habilidad aprendida por nombre/clave normalizada."""
+        key = self._normalize_text(skill_name) or (skill_name or "").strip().lower()
+        if not key:
+            return False
+        data = self.get_memory()
+        skills = data.get("learned_skills", {})
+        if not isinstance(skills, dict):
+            return False
+        skills.pop(key, None)
+        data["learned_skills"] = skills
+        return self.save_memory(data)
+
     def find_learned_skill(self, user_text: str) -> Dict[str, Any] | None:
         """Encuentra habilidad aprendida por coincidencia de trigger en el texto del usuario."""
         normalized = self._normalize_text(user_text)
@@ -226,7 +296,13 @@ class MemoryManager:
             if not isinstance(payload, dict):
                 continue
             trigger = self._normalize_text(str(payload.get("trigger", "")))
-            if trigger and (trigger in normalized or normalized in trigger):
+            if not trigger:
+                continue
+            # El usuario incluye el gatillo completo en su mensaje.
+            if trigger in normalized:
+                return {"skill": skill_name, **payload}
+            # Evitar falsos positivos (ej. "re" dentro de "aprender...").
+            if len(normalized) >= 12 and normalized in trigger:
                 return {"skill": skill_name, **payload}
         return None
 
@@ -462,6 +538,25 @@ class MemoryManager:
     def save_reminders(self, reminders: List[Dict[str, Any]]) -> bool:
         data = self.get_memory()
         data["reminders"] = reminders if isinstance(reminders, list) else []
+        return self.save_memory(data)
+
+    def get_objectives(self) -> List[Dict[str, Any]]:
+        data = self.get_memory()
+        objectives = data.get("objectives", [])
+        return objectives if isinstance(objectives, list) else []
+
+    def save_objectives(self, objectives: List[Dict[str, Any]]) -> bool:
+        data = self.get_memory()
+        data["objectives"] = objectives if isinstance(objectives, list) else []
+        return self.save_memory(data)
+
+    def archive_objective(self, objective_payload: Dict[str, Any]) -> bool:
+        data = self.get_memory()
+        history = data.get("objective_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(objective_payload)
+        data["objective_history"] = history[-100:]
         return self.save_memory(data)
 
     def get_solution_cache(self) -> Dict[str, Any]:

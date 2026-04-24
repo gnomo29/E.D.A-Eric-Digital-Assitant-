@@ -20,9 +20,19 @@ from evolution import EvolutionEngine
 from logger import get_logger
 from memory import MemoryManager
 from mouse_keyboard import MouseKeyboardController
-from nlp_utils import detect_confirmation, detect_secondary_action, parse_command, split_compound_command
+from nlp_utils import (
+    detect_confirmation,
+    detect_secondary_action,
+    normalize_learned_trigger_key,
+    parse_command,
+    split_compound_command,
+)
 from obs_controller import OBSController
+from integration_hub import IntegrationHub
+from multimodal import MultimodalContextCollector
+from objective_planner import ObjectivePlan, ObjectivePlanner, PlanStep
 from optimizer import Optimizer
+from security_levels import SecurityDecision, SecurityManager
 from scheduler import ReminderScheduler, parse_reminder_request
 from system_info import SystemInfo
 from voice import VoiceEngine
@@ -51,11 +61,17 @@ class EDAGUI:
         self.evolution = EvolutionEngine(Path(__file__).resolve().parent)
         self.web_solver = WebSolver(self.core, self.memory)
         self.obs = OBSController()
+        self.integrations = IntegrationHub()
+        self.multimodal = MultimodalContextCollector()
+        self.security = SecurityManager()
+        self.objective_planner = ObjectivePlanner()
         self.actions = ActionController(confirm_callback=self.confirm_critical)
         self.mouse_keyboard = MouseKeyboardController()
         self.reminders = ReminderScheduler(on_due=self._on_reminder_due)
         self.reminders.start()
         self.pending_auto_learn: dict = {}
+        self.current_objective: ObjectivePlan | None = None
+        self._executing_objective = False
 
         self.status_text = tk.StringVar(value="Inicializando")
         self.cpu_text = tk.StringVar(value="CPU_LOAD: --")
@@ -73,6 +89,7 @@ class EDAGUI:
         self._build_layout()
         self._start_background_loops()
         self._restore_persisted_reminders()
+        self._restore_objective_state()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.append_chat_animated("E.D.A.", "Protocolos de inicialización completados. Todos los servicios están en espera.")
@@ -86,6 +103,12 @@ class EDAGUI:
     def _persist_reminders(self) -> None:
         self.memory.save_reminders(self.reminders.list_pending())
 
+    def _persist_objective_state(self) -> None:
+        if self.current_objective is None:
+            self.memory.save_objectives([])
+            return
+        self.memory.save_objectives([self.current_objective.to_dict()])
+
     def _restore_persisted_reminders(self) -> None:
         restored_count = 0
         for item in self.memory.get_reminders():
@@ -94,6 +117,19 @@ class EDAGUI:
         if restored_count:
             self.append_chat("E.D.A.", f"Recordatorios restaurados: {restored_count}")
             self._persist_reminders()
+
+    def _restore_objective_state(self) -> None:
+        objectives = self.memory.get_objectives()
+        if not objectives:
+            return
+        latest = objectives[-1]
+        steps = latest.get("steps", []) if isinstance(latest, dict) else []
+        if not isinstance(steps, list):
+            return
+        plan = ObjectivePlan(goal=str(latest.get("goal", "")))
+        plan.created_at = str(latest.get("created_at", plan.created_at))
+        plan.steps = [PlanStep(text=str(s.get("text", "")), done=bool(s.get("done", False))) for s in steps if isinstance(s, dict)]
+        self.current_objective = plan
 
     def _build_layout(self) -> None:
         container = tk.Frame(self.root, bg=config.THEME_BG)
@@ -209,6 +245,7 @@ class EDAGUI:
         )
 
         self._side_button(right, "Configuración", self.action_config)
+        self._side_button(right, "Permisos", self.action_permissions_panel)
         self._side_button(right, "Voz siempre ON", self.action_toggle_voice)
         self._side_button(right, "Limpiar chat", self.action_clear_chat)
         self._side_button(right, "Borrar memoria", self.action_clear_memory)
@@ -321,7 +358,14 @@ class EDAGUI:
         )
 
         if not action_name:
-            return "Abrí la aplicación, pero no detecté una acción secundaria ejecutable."
+            # Misma política solicitada: subacciones desconocidas disparan autoaprendizaje.
+            learn_task = f"en {opened_app}, {secondary_text.strip()}"
+            intro = (
+                "No tengo esa subacción implementada todavía, señor. "
+                "Activaré autoaprendizaje para investigarla en internet y repositorios."
+            )
+            self.append_chat("E.D.A.", intro)
+            return self._start_auto_learn(learn_task, intent="secondary_action")
 
         # Intentar traer al frente la ventana de la app recién abierta.
         activation = self.actions.activate_app_window(opened_app)
@@ -346,18 +390,10 @@ class EDAGUI:
             if not payload:
                 return f"Abrí {opened_app}, pero faltó el texto de búsqueda."
             if self._normalize_web_target(opened_app) == "spotify":
-                # Flujo más confiable para Spotify desktop: foco de búsqueda y reproducir primer resultado.
-                self.actions.activate_app_window("spotify")
-                time.sleep(0.5)
-                self.mouse_keyboard.hotkey("ctrl", "l")
-                time.sleep(0.3)
-                typed = self.mouse_keyboard.type_text(payload)
-                if typed.get("status") == "ok":
-                    self.mouse_keyboard.hotkey("enter")
-                    time.sleep(1.0)
-                    self.mouse_keyboard.hotkey("enter")
+                ok, msg = self._play_spotify_query(payload)
+                if ok:
                     return f"Abriendo Spotify y reproduciendo: {payload}."
-                return f"Abrí Spotify, pero no pude escribir la búsqueda: {typed.get('message', 'error desconocido')}"
+                return msg
             typed = self.mouse_keyboard.type_text(payload)
             if typed.get("status") == "ok":
                 self.mouse_keyboard.hotkey("enter")
@@ -368,9 +404,7 @@ class EDAGUI:
 
     @staticmethod
     def _normalize_trigger_text(text: str) -> str:
-        cleaned = re.sub(r"[¿?¡!.,;:\"'()\[\]]", " ", (text or "").lower())
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
+        return normalize_learned_trigger_key(text)
 
     def _try_learn_automation_rule(self, user_text: str) -> str | None:
         """
@@ -380,22 +414,57 @@ class EDAGUI:
         """
         text = (user_text or "").strip()
         normalized = self._normalize_trigger_text(text)
+        if not normalized:
+            return None
 
-        m1 = re.search(r"quiero que\s+(.+?)\s+cada vez que te diga\s+(.+)$", normalized)
+        # Formato A: "quiero que <acción> cada vez que diga/pida <gatillo>"
+        m1 = re.search(
+            r"quiero que\s+(.+?)\s+cada vez que(?:\s+te)?\s+(?:diga|pida|digo)\s+(.+)$",
+            normalized,
+        )
         if m1:
-            action = m1.group(1).strip()
-            trigger = m1.group(2).strip()
+            action = m1.group(1).strip(" ,.;:")
+            trigger = m1.group(2).strip(" ,.;:")
             if action and trigger:
                 self.memory.learn_command(trigger, action)
                 return f"He aprendido la automatización. Cuando diga '{trigger}', ejecutaré: {action}."
 
-        m2 = re.search(r"cuando te diga\s+(.+?)\s+(?:haz|hace|quiero que)\s+(.+)$", normalized)
+        # Formato B: "cada vez que diga/pida <gatillo> haz/hagas <acción>"
+        m2 = re.search(
+            r"cada vez que(?:\s+te)?\s+(?:diga|pida|digo)\s+(.+?)\s+(?:haz|hace|hagas|quiero que)\s+(.+)$",
+            normalized,
+        )
         if m2:
-            trigger = m2.group(1).strip()
-            action = m2.group(2).strip()
+            trigger = m2.group(1).strip(" ,.;:")
+            action = m2.group(2).strip(" ,.;:")
             if action and trigger:
                 self.memory.learn_command(trigger, action)
                 return f"Automatización guardada. Trigger: '{trigger}' -> Acción: {action}."
+
+        # Formato C: "cuando diga/pida <gatillo> haz/hagas <acción>"
+        m3 = re.search(
+            r"cuando(?:\s+te)?\s+(?:diga|pida|digo)\s+(.+?)\s+(?:haz|hace|hagas|quiero que)\s+(.+)$",
+            normalized,
+        )
+        if m3:
+            trigger = m3.group(1).strip(" ,.;:")
+            action = m3.group(2).strip(" ,.;:")
+            if action and trigger:
+                self.memory.learn_command(trigger, action)
+                return f"Automatización guardada. Trigger: '{trigger}' -> Acción: {action}."
+
+        # Formato D: "agrega acción <Y> al comando <X>"
+        m4 = re.search(
+            r"agrega(?:r)?\s+(?:accion|acción)\s+(.+?)\s+al\s+comando\s+(.+)$",
+            normalized,
+        )
+        if m4:
+            action = m4.group(1).strip(" ,.;:")
+            trigger = m4.group(2).strip(" ,.;:")
+            if action and trigger:
+                self.memory.learn_command(trigger, action, append=True)
+                total = len(self.memory.get_learned_actions(trigger))
+                return f"Acción agregada al trigger '{trigger}'. Total de acciones encadenadas: {total}."
 
         return None
 
@@ -404,6 +473,20 @@ class EDAGUI:
         Ejecuta acciones aprendidas por trigger.
         Incluye caso especial: OBS + escena nombrada.
         """
+        action = (action_text or "").strip()
+        chain_parts = split_compound_command(action)
+        if len(chain_parts) > 1:
+            messages = []
+            for sub_action in chain_parts:
+                result = self._execute_single_automation_action(sub_action)
+                messages.append(result)
+                time.sleep(0.35)
+            return " ".join(messages)
+
+        return self._execute_single_automation_action(action)
+
+    def _execute_single_automation_action(self, action_text: str) -> str:
+        """Ejecuta una sola acción de automatización."""
         action = (action_text or "").strip()
         normalized = self._normalize_trigger_text(action)
         if not normalized:
@@ -429,6 +512,38 @@ class EDAGUI:
             self.mouse_keyboard.hotkey("enter")
             return f"Abrí OBS e intenté cambiar a la escena '{scene_name}' (fallback UI)."
 
+        # Reproducir música (Spotify) desde reglas aprendidas, p. ej. "reproducir queen".
+        spot_play = re.match(r"^(?:reproduce|reproducir|pon|ponme)\s+(.+)$", normalized)
+        if spot_play:
+            if not self._is_action_family_allowed("automation"):
+                return "La reproducción en automatización está bloqueada por permisos."
+            q = spot_play.group(1).strip()
+            if not q:
+                return "La automatización de reproducción no tiene título de canción."
+            ok, msg = self._play_spotify_query(q)
+            if ok:
+                return f"Reproduciendo {q} en Spotify (automatización)."
+            return f"No pude reproducir en Spotify: {msg}"
+
+        # Volumen / brillo / cerrar app: mismos intents que el chat principal.
+        parsed_auto = parse_command(action)
+        if parsed_auto.intent == "volume":
+            if not self._is_action_family_allowed("system"):
+                return "Volumen bloqueado por permisos."
+            return self._handle_volume_command(action)
+        if parsed_auto.intent == "brightness":
+            if not self._is_action_family_allowed("system"):
+                return "Brillo bloqueado por permisos."
+            return self._handle_brightness_command(action)
+        if parsed_auto.intent == "close_app":
+            if not self._is_action_family_allowed("system"):
+                return "Cerrar aplicaciones bloqueado por permisos."
+            target = (parsed_auto.entity or action).strip()
+            result = self.actions.close_app(target)
+            if result.get("status") == "ok":
+                return result.get("message", "Aplicación cerrada.")
+            return result.get("message", "No pude cerrar la aplicación.")
+
         # Reutiliza acciones existentes para frases simples.
         if normalized.startswith(("abre ", "abrir ", "me abras ")):
             target = normalized.split(" ", 1)[1].strip() if " " in normalized else normalized
@@ -440,12 +555,169 @@ class EDAGUI:
                 return web_result.get("message", "Automatización web ejecutada.")
             return "No pude ejecutar la automatización de apertura."
 
-        # Fallback: intentar como comando compuesto ya existente.
+        # Fallback: intentar como comando compuesto de apertura ya existente.
         compound = self._try_handle_compound_open_command(action, action)
         if compound:
             return compound
 
         return "Automatización aprendida, pero esta acción aún no tiene ejecutor específico."
+
+    def _build_capabilities_report(self) -> str:
+        """
+        Resumen dinámico de capacidades basado en módulos/código cargado.
+        Esto permite responder "qué puedes hacer" mirando su propia implementación.
+        """
+        capabilities = [
+            "Conversación y respuestas con IA local (Ollama) + búsqueda web de respaldo",
+            "Comandos de sistema: abrir/cerrar apps, volumen, brillo, mute",
+            "Recordatorios con voz, popup, persistencia y cancelación por ID",
+            "Automatizaciones aprendidas por gatillo (frase -> acción)",
+            "Navegación web inteligente (Google, YouTube, Spotify, Steam)",
+            "Detección de dispositivos USB conectados",
+            "Bluetooth: escaneo y resumen de dispositivos",
+            "Autoaprendizaje: investiga web/repos, genera código y pide confirmación",
+        ]
+        extra = []
+        if getattr(self.obs, "available", False):
+            extra.append("Integración OBS por websocket para cambiar escenas")
+        if getattr(self.mouse_keyboard, "available", False):
+            extra.append("Automatización de teclado/mouse para tareas en apps")
+        if getattr(self.voice, "tts_available", False):
+            extra.append("Respuesta hablada siempre activa (modo JARVIS)")
+
+        lines = [f"- {item}" for item in capabilities + extra]
+        return "Estas son mis capacidades actuales, señor:\n" + "\n".join(lines)
+
+    def _play_spotify_query(self, query: str) -> tuple[bool, str]:
+        """
+        Ejecuta búsqueda y reproducción en Spotify desktop.
+        Retorna (ok, mensaje_error_o_info).
+        """
+        q = (query or "").strip()
+        if not q:
+            return False, "No recibí texto de canción para Spotify."
+        # Intento 1: abrir búsqueda directa en Spotify app por URI.
+        uri_open = self.actions.open_website(f"spotify:search:{quote_plus(q)}")
+        if uri_open.get("status") != "ok":
+            # Intento 2: abrir app manualmente.
+            opened = self.actions.open_app("spotify")
+            if opened.get("status") != "ok":
+                return False, "No pude abrir Spotify de escritorio."
+        self.actions.activate_app_window("spotify")
+        time.sleep(0.9)
+        # Flujo recomendado en desktop: Ctrl+K abre búsqueda rápida; Enter reproduce el resultado.
+        # (Ctrl+L también enfoca búsqueda en muchas versiones; probamos ambos.)
+        self.mouse_keyboard.hotkey("ctrl", "k")
+        time.sleep(0.35)
+        self.mouse_keyboard.hotkey("ctrl", "a")
+        time.sleep(0.05)
+        self.mouse_keyboard.hotkey("backspace")
+        time.sleep(0.05)
+        typed = self.mouse_keyboard.type_text(q)
+        if typed.get("status") != "ok":
+            log.warning("[SPOTIFY] type_text falló: %s", typed.get("message"))
+        time.sleep(0.2)
+        self.mouse_keyboard.press("enter")
+        time.sleep(1.1)
+        # A veces el primer Enter solo confirma búsqueda; el segundo inicia reproducción.
+        self.mouse_keyboard.press("enter")
+        time.sleep(0.45)
+        # Navegación por teclado al primer resultado (best-effort).
+        self.mouse_keyboard.press("down")
+        time.sleep(0.12)
+        self.mouse_keyboard.press("enter")
+        time.sleep(0.35)
+        # Último recurso: tecla multimedia play/pause (si hay cola o foco en reproductor).
+        self.mouse_keyboard.press("playpause")
+        time.sleep(0.2)
+        # Fallback adicional: barra de búsqueda principal (Ctrl+L) y repetir.
+        self.mouse_keyboard.hotkey("ctrl", "l")
+        time.sleep(0.25)
+        self.mouse_keyboard.hotkey("ctrl", "a")
+        time.sleep(0.05)
+        self.mouse_keyboard.hotkey("backspace")
+        time.sleep(0.05)
+        typed2 = self.mouse_keyboard.type_text(q)
+        if typed2.get("status") == "ok":
+            self.mouse_keyboard.press("enter")
+            time.sleep(1.0)
+            self.mouse_keyboard.press("enter")
+            time.sleep(0.35)
+            self.mouse_keyboard.press("playpause")
+        return True, "OK"
+
+    def _extract_capability_learning_request(self, text: str) -> str:
+        """
+        Detecta pedidos tipo:
+        - "consigue la habilidad de acceder a la cámara"
+        - "aprende a controlar la cámara"
+        """
+        normalized = self._normalize_trigger_text(text)
+        patterns = [
+            r"(?:consigue|adquiere|obtén|obtiene)\s+la\s+habilidad\s+de\s+(.+)$",
+            r"(?:aprende|aprender)\s+a\s+(.+)$",
+            r"(?:quiero\s+que\s+aprendas\s+a)\s+(.+)$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                task = match.group(1).strip()
+                if task:
+                    return task
+        return ""
+
+    def _should_force_auto_learn(self, user_text: str, parsed_intent: str) -> bool:
+        """
+        Decide si debe activar autoaprendizaje cuando no entiende un pedido.
+        Enfocado en frases de acción/tarea, evitando charla casual.
+        """
+        if parsed_intent not in {"chat", "question"}:
+            return False
+
+        normalized = self._normalize_trigger_text(user_text)
+        if len(normalized) < 6:
+            return False
+
+        casual = {
+            "hola",
+            "buenos dias",
+            "buenas tardes",
+            "buenas noches",
+            "gracias",
+            "como estas",
+            "qué tal",
+            "que tal",
+            "quien eres",
+            "como te llamas",
+        }
+        if normalized in casual:
+            return False
+
+        action_markers = (
+            "abre",
+            "abrir",
+            "entra",
+            "entrar",
+            "configura",
+            "configurar",
+            "instala",
+            "instalar",
+            "conecta",
+            "conectar",
+            "controla",
+            "controlar",
+            "automatiza",
+            "automatizar",
+            "descarga",
+            "descargar",
+            "reproduce",
+            "reproducir",
+            "haz",
+            "hace",
+            "quiero que",
+            "necesito que",
+        )
+        return any(marker in normalized for marker in action_markers)
 
     @staticmethod
     def _normalize_web_target(name: str) -> str:
@@ -523,14 +795,10 @@ class EDAGUI:
 
         # Acción 1: abrir app o destino web.
         first_target = first.entity or opened_app
-        if self._should_prefer_desktop_app(first_target):
-            open_result = self.actions.open_app(first_target)
-            if open_result.get("status") != "ok":
-                open_result = self._open_web_target(first_target) or open_result
-        else:
-            open_result = self._open_web_target(first_target)
-            if open_result is None:
-                open_result = self.actions.open_app(first_target)
+        # Prioridad: abrir programa de escritorio; web solo como fallback.
+        open_result = self.actions.open_app(first_target)
+        if open_result.get("status") != "ok":
+            open_result = self._open_web_target(first_target) or open_result
         if open_result.get("status") != "ok":
             return open_result.get("message", "No pude abrir la aplicación.")
 
@@ -581,15 +849,7 @@ class EDAGUI:
             if evolve_result.get("status") != "ok":
                 return f"No pude aplicar la auto-mejora: {evolve_result.get('message', 'error desconocido')}"
 
-            skill_name = payload.get("skill_name", payload.get("function", "habilidad"))
-            self.memory.save_learned_skill(
-                skill_name=str(skill_name),
-                trigger=str(payload.get("trigger", "")).strip(),
-                module=str(payload.get("module", "")).strip(),
-                function_name=str(payload.get("function", "")).strip(),
-            )
-
-            log.info("[EVOLUTION] Skill aplicada: %s", skill_name)
+            skill_name = str(payload.get("skill_name", payload.get("function", "habilidad")))
             execute_now = self.web_solver.execute_generated_function(
                 Path(__file__).resolve().parent / str(payload.get("module", "")),
                 str(payload.get("function", "")),
@@ -597,13 +857,34 @@ class EDAGUI:
             )
             execution_msg = execute_now.get("message", "") if isinstance(execute_now, dict) else ""
             if execute_now.get("status") == "ok":
+                self.memory.save_learned_skill(
+                    skill_name=skill_name,
+                    trigger=str(payload.get("trigger", "")).strip(),
+                    module=str(payload.get("module", "")).strip(),
+                    function_name=str(payload.get("function", "")).strip(),
+                )
+                log.info("[EVOLUTION] Skill aplicada y validada: %s", skill_name)
                 return (
                     f"✓ He mejorado mi código. Ahora puedo {payload.get('task', 'hacer esta acción')}. "
                     f"Ejecutando ahora: {execution_msg}"
                 )
+
+            # Política anti-simulación: si no ejecuta, no se considera aprendido.
+            try:
+                backups = evolve_result.get("backups", []) if isinstance(evolve_result, dict) else []
+                if isinstance(backups, list) and backups:
+                    backup_file = Path(str(backups[0]))
+                    target = Path(__file__).resolve().parent / str(payload.get("module", ""))
+                    if backup_file.exists() and target.exists():
+                        target.write_text(backup_file.read_text(encoding="utf-8"), encoding="utf-8")
+                        log.warning("[EVOLUTION] Revertido módulo por fallo de validación en ejecución: %s", target)
+            except Exception as exc:
+                log.error("[EVOLUTION] Error intentando revertir cambio no validado: %s", exc)
+
+            self.memory.forget_learned_skill(skill_name)
             return (
-                f"✓ He mejorado mi código. Ahora puedo {payload.get('task', 'hacer esta acción')}, "
-                f"pero la ejecución inmediata falló: {execution_msg}"
+                "No voy a fingir que aprendí algo que no funciona, señor. "
+                f"La ejecución falló ({execution_msg}) y revertí el cambio para mantener estabilidad."
             )
 
         return "Tengo una mejora pendiente. Responde: SÍ, NO o VER CÓDIGO."
@@ -634,6 +915,7 @@ class EDAGUI:
         return (
             f"He aprendido cómo {task}. He generado código Python para implementarlo en {generated.get('module')}. "
             f"Librerías detectadas: {libs_txt}.\n"
+            "Solo confirmaré que aprendí si funciona al ejecutarlo; si falla, revertiré el cambio.\n"
             "¿Puedo mejorar mi código para agregar esta funcionalidad? [SÍ] [NO] [VER CÓDIGO]"
         )
 
@@ -681,14 +963,149 @@ class EDAGUI:
 
         normalized_text = (text or "").strip().lower()
 
+        # Recordatorios: el texto puede mencionar "apagar" u otras palabras sensibles
+        # en el *mensaje futuro*, no como orden inmediata. No aplicar bloqueo de alto riesgo.
+        parsed_reminder = parse_reminder_request(text)
+        if parsed_reminder is not None:
+            security_decision = SecurityDecision(True, "low", "Recordatorio programado")
+        else:
+            security_decision = self.security.assess(text)
+
+        # Seguridad por niveles (bloqueo preventivo de alto riesgo).
+        if not security_decision.allowed:
+            self._respond_and_store(
+                text,
+                f"Bloqueé este comando por seguridad ({security_decision.risk}), señor. "
+                "Confírmelo de forma más explícita si desea continuar.",
+            )
+            return
+
+        if normalized_text.startswith(("objetivo ", "planifica ", "planificar ")):
+            goal = re.sub(r"^(objetivo|planifica|planificar)\s+", "", normalized_text).strip()
+            if goal:
+                self.current_objective = self.objective_planner.build_plan(goal)
+                self._persist_objective_state()
+                steps_txt = "\n".join(f"- {s.text}" for s in self.current_objective.steps)
+                self._respond_and_store(text, f"Objetivo planificado, señor:\n{steps_txt}")
+                return
+
+        if any(k in normalized_text for k in ["siguiente paso del objetivo", "estado del objetivo"]):
+            if not self.current_objective:
+                self._respond_and_store(text, "No hay un objetivo activo, señor.")
+                return
+            step = self.current_objective.next_pending()
+            if not step:
+                self._respond_and_store(text, "El objetivo actual ya está completado, señor.")
+                return
+            self._respond_and_store(text, f"Siguiente paso del objetivo: {step.text}")
+            return
+
+        if any(k in normalized_text for k in ["ejecuta siguiente paso", "ejecutar siguiente paso"]):
+            if not self.current_objective:
+                self._respond_and_store(text, "No hay objetivo activo para ejecutar, señor.")
+                return
+            if self._executing_objective:
+                self._respond_and_store(text, "Ya estoy ejecutando un paso de objetivo, señor.")
+                return
+            step = self.current_objective.next_pending()
+            if not step:
+                self._respond_and_store(text, "No quedan pasos pendientes en el objetivo, señor.")
+                return
+            self._executing_objective = True
+            try:
+                self._process_user_message(step.text)
+                self.current_objective.mark_next_done()
+                if self.current_objective.is_completed():
+                    self.memory.archive_objective(self.current_objective.to_dict())
+                    self.current_objective = None
+                self._persist_objective_state()
+            finally:
+                self._executing_objective = False
+            return
+
+        if any(k in normalized_text for k in ["ejecuta objetivo completo", "ejecutar objetivo completo", "completa el objetivo"]):
+            if not self.current_objective:
+                self._respond_and_store(text, "No hay objetivo activo para ejecutar, señor.")
+                return
+            if self._executing_objective:
+                self._respond_and_store(text, "Ya estoy ejecutando un objetivo, señor.")
+                return
+            if not self._is_action_family_allowed("automation"):
+                self._respond_and_store(text, "La ejecución automática está bloqueada por permisos, señor.")
+                return
+            self._executing_objective = True
+            executed = 0
+            try:
+                while self.current_objective and self.current_objective.next_pending():
+                    step = self.current_objective.next_pending()
+                    if step is None:
+                        break
+                    self._process_user_message(step.text)
+                    self.current_objective.mark_next_done()
+                    executed += 1
+                    if executed >= 10:
+                        break
+                if self.current_objective and self.current_objective.is_completed():
+                    self.memory.archive_objective(self.current_objective.to_dict())
+                    self.current_objective = None
+                self._persist_objective_state()
+                self._respond_and_store(text, f"Objetivo ejecutado en modo autónomo. Pasos procesados: {executed}.")
+            finally:
+                self._executing_objective = False
+            return
+
+        if any(k in normalized_text for k in ["estado de integraciones", "integraciones", "health integraciones"]):
+            status = self.integrations.get_status()
+            report = "\n".join(f"- {k}: {v}" for k, v in status.items())
+            self._respond_and_store(text, f"Estado de integraciones, señor:\n{report}")
+            return
+
+        if any(
+            q in normalized_text
+            for q in [
+                "que puedes hacer",
+                "qué puedes hacer",
+                "cuales son tus habilidades",
+                "cuáles son tus habilidades",
+                "que habilidades tienes",
+                "qué habilidades tienes",
+            ]
+        ):
+            self._respond_and_store(text, self._build_capabilities_report())
+            return
+
+        capability_task = self._extract_capability_learning_request(text)
+        if capability_task:
+            if not self._is_action_family_allowed("learning"):
+                self._respond_and_store(text, "El autoaprendizaje está bloqueado por permisos, señor.")
+                return
+            preface = (
+                f"Entendido, señor. Investigaré cómo {capability_task} en internet y repositorios; "
+                "antes de aplicar cualquier mejora haré backup automático del código."
+            )
+            self.append_chat("E.D.A.", preface)
+            answer = self._start_auto_learn(f"aprender a {capability_task}", intent="capability_upgrade")
+            self._respond_and_store(text, answer)
+            return
+
         learn_auto_answer = self._try_learn_automation_rule(text)
         if learn_auto_answer:
+            if not self._is_action_family_allowed("automation"):
+                self._respond_and_store(text, "No puedo registrar automatizaciones: permisos de automation bloqueados, señor.")
+                return
             self._respond_and_store(text, learn_auto_answer)
             return
 
-        learned_action = self.memory.get_learned_action(self._normalize_trigger_text(text))
-        if learned_action:
-            auto_answer = self._execute_automation_action(learned_action)
+        learned_actions = self.memory.get_learned_actions(self._normalize_trigger_text(text))
+        if learned_actions:
+            if not self._is_action_family_allowed("automation"):
+                self._respond_and_store(text, "Las automatizaciones están bloqueadas por permisos, señor.")
+                return
+            messages = []
+            for action in learned_actions:
+                messages.append(self._execute_automation_action(action))
+                time.sleep(0.25)
+            auto_answer = " ".join(messages)
             self._respond_and_store(text, auto_answer)
             return
 
@@ -696,19 +1113,13 @@ class EDAGUI:
         spotify_fallback_query = self.actions.extract_spotify_play_query(text)
         spotify_query = nav_query if nav_command == "spotify_search" else spotify_fallback_query
         if spotify_query:
-            opened = self.actions.open_app("spotify")
-            if opened.get("status") == "ok":
-                self.actions.activate_app_window("spotify")
-                time.sleep(0.6)
-                self.mouse_keyboard.hotkey("ctrl", "l")
-                time.sleep(0.3)
-                typed = self.mouse_keyboard.type_text(spotify_query)
-                if typed.get("status") == "ok":
-                    self.mouse_keyboard.hotkey("enter")
-                    time.sleep(1.0)
-                    self.mouse_keyboard.hotkey("enter")
-                    self._respond_and_store(text, f"Reproduciendo {spotify_query} en Spotify, señor.")
-                    return
+            if not self._is_action_family_allowed("automation"):
+                self._respond_and_store(text, "La automatización multimedia está bloqueada por permisos, señor.")
+                return
+            ok, msg = self._play_spotify_query(spotify_query)
+            if ok:
+                self._respond_and_store(text, f"Reproduciendo {spotify_query} en Spotify, señor.")
+                return
             # fallback web si desktop falla
             fallback_nav = self.actions.execute_navigation_command(text)
             if fallback_nav is not None:
@@ -716,10 +1127,16 @@ class EDAGUI:
                 return
             # fallback extra para comandos sin "en spotify"
             self.actions.open_website(f"https://open.spotify.com/search/{quote_plus(spotify_query)}/tracks")
-            self._respond_and_store(text, f"No pude usar Spotify desktop; abrí Spotify web con {spotify_query}, señor.")
+            self._respond_and_store(
+                text,
+                f"No pude usar Spotify desktop ({msg}); abrí Spotify web con {spotify_query}, señor.",
+            )
             return
 
         if any(k in normalized_text for k in ["usb", "dispositivos usb", "que hay conectado por usb", "qué hay conectado por usb"]):
+            if not self._is_action_family_allowed("system"):
+                self._respond_and_store(text, "El acceso a información del sistema está bloqueado por permisos, señor.")
+                return
             usb = self.actions.list_usb_devices()
             if usb.get("status") != "ok":
                 self._respond_and_store(text, f"No pude listar los USB, señor: {usb.get('message', 'error desconocido')}")
@@ -732,9 +1149,11 @@ class EDAGUI:
             self._respond_and_store(text, f"Estos son los USB detectados, señor:\n{items}")
             return
 
-        reminder_req = parse_reminder_request(text)
-        if reminder_req is not None:
-            created = self.reminders.add(reminder_req)
+        if parsed_reminder is not None:
+            if not self._is_action_family_allowed("automation"):
+                self._respond_and_store(text, "Los recordatorios están bloqueados por permisos, señor.")
+                return
+            created = self.reminders.add(parsed_reminder)
             self._persist_reminders()
             answer = (
                 f"Recordatorio agendado para {created.get('scheduled_for')}: {created.get('message')}"
@@ -797,6 +1216,23 @@ class EDAGUI:
             return
 
         parsed = parse_command(text)
+        intent_family_map = {
+            "open_app": "system",
+            "close_app": "system",
+            "volume": "system",
+            "brightness": "system",
+            "bluetooth": "system",
+            "system_info": "system",
+            "search_web": "web",
+            "arduino_help": "web",
+            "remember": "automation",
+            "forget": "automation",
+            "evolve": "learning",
+        }
+        family = intent_family_map.get(parsed.intent)
+        if family and not self._is_action_family_allowed(family):
+            self._respond_and_store(text, f"La familia de acciones '{family}' está bloqueada por permisos, señor.")
+            return
         if not self._confirm_sensitive_intent(parsed.intent, text):
             self._respond_and_store(text, "Acción cancelada por seguridad, señor.")
             return
@@ -805,6 +1241,9 @@ class EDAGUI:
         # PRIORIDAD: comando "investiga" forzado a búsqueda web en background (sin abrir navegador).
         investigation_topic = self.core.extract_investigation_query(text)
         if investigation_topic:
+            if not self._is_action_family_allowed("web"):
+                self._respond_and_store(text, "La investigación web está bloqueada por permisos, señor.")
+                return
             self._set_status("Investigando en línea...")
             log.info("[RESEARCH] Investigando: %s", investigation_topic)
             self.append_chat("E.D.A.", f"Investigando {investigation_topic}...")
@@ -821,13 +1260,10 @@ class EDAGUI:
                 answer = compound_answer
             else:
                 target = parsed.entity or text
-                if self._should_prefer_desktop_app(target):
-                    result = self.actions.open_app(target)
-                    if result.get("status") != "ok":
-                        result = self._open_web_target(target) or result
-                else:
-                    web_result = self._open_web_target(target)
-                    result = web_result if web_result is not None else self.actions.open_app(target)
+                # Prioridad global: app de escritorio primero.
+                result = self.actions.open_app(target)
+                if result.get("status") != "ok":
+                    result = self._open_web_target(target) or result
                 if result.get("status") == "error":
                     # Último fallback: buscar en navegador lo pedido por el usuario.
                     fallback_url = f"https://www.google.com/search?q={quote_plus(target)}&hl=es"
@@ -865,7 +1301,7 @@ class EDAGUI:
                 answer += " | " + ", ".join(d.get("name", "?") for d in devices[:4])
 
         elif parsed.intent == "remember":
-            parts = (parsed.entity or "").split(" ", 1)
+            parts = ((parsed.entity or "").strip()).split(" ", 1)
             if len(parts) == 2:
                 key, value = parts
                 ok = self.memory.remember(key, value)
@@ -874,7 +1310,7 @@ class EDAGUI:
                 answer = "Formato sugerido: recuerda <clave> <valor>."
 
         elif parsed.intent == "forget":
-            key = parsed.entity.strip()
+            key = (parsed.entity or "").strip()
             if key:
                 ok = self.memory.forget(key)
                 answer = "He olvidado ese dato, señor." if ok else "No pude olvidar ese dato."
@@ -918,17 +1354,36 @@ class EDAGUI:
                 answer = f"Señor, recuerdo lo siguiente sobre '{remember_key}': {recalled}"
             else:
                 if self.core.is_research_like_query(text):
+                    if not self._is_action_family_allowed("web"):
+                        self._respond_and_store(text, "La investigación web está bloqueada por permisos, señor.")
+                        return
                     self._set_status("Investigando en navegador...")
                     self.append_chat("E.D.A.", "Abriendo navegador e investigando fuentes...")
                     self.core.open_browser_for_research(text, max_pages=2)
                     answer = self.core.force_research_answer(text)
                     self._respond_and_store(text, answer)
                     return
+                if self._should_force_auto_learn(text, parsed.intent):
+                    if not self._is_action_family_allowed("learning"):
+                        self._respond_and_store(text, "El autoaprendizaje está bloqueado por permisos, señor.")
+                        return
+                    intro = (
+                        "No tengo un ejecutor directo para esa tarea, señor. "
+                        "Activaré autoaprendizaje y buscaré en internet y repositorios cómo hacerlo."
+                    )
+                    self.append_chat("E.D.A.", intro)
+                    answer = self._start_auto_learn(text, intent=parsed.intent)
+                    self._respond_and_store(text, answer)
+                    return
                 mem = self.memory.get_memory()
                 history = mem.get("chat_history", []) or mem.get("history", [])
-                candidate_answer = self.core.ask(text, history=history)
+                mm_context = self.multimodal.collect_summary()
+                candidate_answer = self.core.ask(text, history=history, extra_context=mm_context)
                 if self.core.should_activate_auto_learn(text, candidate_answer):
-                    answer = self._start_auto_learn(text, intent=parsed.intent)
+                    if not self._is_action_family_allowed("learning"):
+                        answer = "Detecté necesidad de autoaprendizaje, pero esa capacidad está bloqueada por permisos, señor."
+                    else:
+                        answer = self._start_auto_learn(text, intent=parsed.intent)
                 else:
                     answer = candidate_answer
 
@@ -1041,12 +1496,83 @@ class EDAGUI:
     def action_config(self) -> None:
         mem = self.memory.get_memory()
         prefs = mem.get("preferences", {})
+        perms = prefs.get("action_permissions", {})
         summary = (
             f"Modelo: {prefs.get('model', config.OLLAMA_MODEL)} | Voz: siempre activa | "
+            f"Permisos: system={perms.get('system', True)} web={perms.get('web', True)} "
+            f"automation={perms.get('automation', True)} learning={perms.get('learning', True)} | "
             f"Confirmaciones críticas: {config.REQUIRE_CONFIRMATION_CRITICAL} | "
             f"Permisos GUI: {config.ASK_PERMISSION_FOR_SENSITIVE_ACTIONS}"
         )
         self.append_chat("E.D.A.", summary)
+
+    def _get_action_permissions(self) -> dict:
+        prefs = self.memory.get_memory().get("preferences", {})
+        perms = prefs.get("action_permissions", {})
+        if not isinstance(perms, dict):
+            perms = {}
+        perms.setdefault("system", True)
+        perms.setdefault("web", True)
+        perms.setdefault("automation", True)
+        perms.setdefault("learning", True)
+        return perms
+
+    def _is_action_family_allowed(self, family: str) -> bool:
+        perms = self._get_action_permissions()
+        return bool(perms.get(family, True))
+
+    def action_permissions_panel(self) -> None:
+        perms = self._get_action_permissions()
+        panel = tk.Toplevel(self.root)
+        panel.title("Permisos por acción")
+        panel.configure(bg=config.THEME_PANEL)
+        panel.geometry("420x260")
+
+        tk.Label(
+            panel,
+            text="Control de permisos",
+            bg=config.THEME_PANEL,
+            fg=config.THEME_TEXT,
+            font=("Consolas", 12, "bold"),
+        ).pack(pady=(12, 10))
+
+        vars_map = {
+            "system": tk.BooleanVar(value=bool(perms.get("system", True))),
+            "web": tk.BooleanVar(value=bool(perms.get("web", True))),
+            "automation": tk.BooleanVar(value=bool(perms.get("automation", True))),
+            "learning": tk.BooleanVar(value=bool(perms.get("learning", True))),
+        }
+
+        for key, var in vars_map.items():
+            tk.Checkbutton(
+                panel,
+                text=f"Permitir {key}",
+                variable=var,
+                bg=config.THEME_PANEL,
+                fg="white",
+                selectcolor="#1b274f",
+                activebackground=config.THEME_PANEL,
+            ).pack(anchor="w", padx=20, pady=6)
+
+        def save_permissions() -> None:
+            mem = self.memory.get_memory()
+            prefs = mem.get("preferences", {})
+            prefs["action_permissions"] = {k: bool(v.get()) for k, v in vars_map.items()}
+            mem["preferences"] = prefs
+            self.memory.save_memory(mem)
+            panel.destroy()
+            self.append_chat("E.D.A.", "Permisos actualizados correctamente, señor.")
+
+        tk.Button(
+            panel,
+            text="Guardar",
+            command=save_permissions,
+            bg="#1b274f",
+            fg="white",
+            relief="flat",
+            padx=12,
+            pady=6,
+        ).pack(pady=12)
 
     def action_toggle_voice(self) -> None:
         # Requisito del usuario: hablar siempre en voz alta.

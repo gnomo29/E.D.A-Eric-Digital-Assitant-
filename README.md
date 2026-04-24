@@ -14,6 +14,7 @@ E.D.A. integra:
 Guía para principiantes (archivo por archivo):
 - `GUIA_NOVATO_CODIGO.md`
 - `GUIA_LIBRERIAS_Y_EXTENSIONES.md` (librerías, extensiones y buenas prácticas)
+- `EJEMPLOS_CAPACIDADES_EDA.txt` (frases de ejemplo por capacidad; mantener al día con el código)
 
 ---
 
@@ -55,6 +56,7 @@ pip install -r requirements.txt
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+Incluye comprobaciones de memoria, recordatorios, NLP (`parse_command`), web y capas avanzadas. Si falta algún paquete (p. ej. `requests`, `bs4`), instálalo con `pip` antes de ejecutar la suite completa.
 
 ### Health check del entorno
 ```bash
@@ -136,15 +138,23 @@ EDA_Project/
 ├── web_search.py
 ├── web_solver.py
 ├── bluetooth_manager.py
+├── integration_hub.py
+├── obs_controller.py
+├── objective_planner.py
+├── multimodal.py
 ├── optimizer.py
 ├── evolution.py
+├── skills_auto.py
+├── security_levels.py
 ├── scheduler.py
 ├── system_info.py
 ├── clipboard.py
 ├── logger.py
 ├── utils.py
+├── health_check.py
 ├── requirements.txt
 ├── README.md
+├── tests/
 ├── memory/
 │   ├── memoria.json
 │   ├── bluetooth_devices.json
@@ -163,8 +173,13 @@ EDA_Project/
 - "E.D.A., abre notepad"
 - "Jarvis, optimiza el sistema"
 - "E.D.A., escanea bluetooth"
-- "Investiga parpadeo LED Arduino sin delay"
+- "Investiga parpadeo LED Arduino sin delay" (comando forzado de investigación en `core.py`)
+- "Busca tutoriales de Python" / "Consulta el precio del dólar" (intención `search_web` en `nlp_utils.py`; la consulta va en `entity` del comando parseado)
 - "Muéstrame estado de cpu y ram"
+
+**Preguntas con `?`:** las que empiezan como orden (p. ej. "¿abre Chrome?", "sube el volumen?") no se tratan como solo “pregunta de conocimiento” para abrir investigación web; las dudas tipo “¿Qué es un agujero negro?” sí pueden activar el flujo de investigación según permisos (`core.is_research_like_query`).
+
+Lista ampliada de frases: `EJEMPLOS_CAPACIDADES_EDA.txt`.
 
 Wake words soportadas:
 - `E.D.A.`
