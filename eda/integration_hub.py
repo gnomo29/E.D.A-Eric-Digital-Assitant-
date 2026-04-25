@@ -20,6 +20,7 @@ class IntegrationHub:
             "ollama": "unknown",
             "obs_websocket": "unknown",
             "spotify_desktop": "unknown",
+            "spotify_web_api": "unknown",
         }
         # Ollama
         try:
@@ -45,5 +46,13 @@ class IntegrationHub:
             status["spotify_desktop"] = "found" if spot else "not_found"
         except Exception:
             status["spotify_desktop"] = "unknown"
+
+        try:
+            from . import spotify_web
+
+            status["spotify_web_api"] = spotify_web.describe_integration_status()
+        except Exception as exc:
+            log.debug("Spotify web status: %s", exc)
+            status["spotify_web_api"] = "error"
 
         return status

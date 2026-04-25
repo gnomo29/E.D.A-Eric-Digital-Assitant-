@@ -19,6 +19,22 @@ from urllib3.util.retry import Retry
 log = get_logger("utils")
 
 
+def load_env_dotfile() -> None:
+    """
+    Carga variables desde `.env` en la raíz del repo (no pisa variables ya definidas en el sistema).
+    Requiere el paquete opcional `python-dotenv` (incluido en requirements.txt).
+    """
+    path = config.BASE_DIR / ".env"
+    if not path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        log.debug("python-dotenv no instalado; no se cargó .env")
+        return
+    load_dotenv(path, override=False)
+
+
 def ensure_project_dirs() -> None:
     """Crea carpetas base del proyecto si no existen."""
     for path in [

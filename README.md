@@ -12,6 +12,7 @@ Asistente de escritorio estilo JARVIS (Windows 10/11 principalmente; en Linux/ma
 | Voz | TTS (`pyttsx3`) + STT (`speech_recognition`) en español |
 | Sistema | Apps, volumen, brillo, Bluetooth, optimización (`eda/actions.py`, etc.) |
 | Web | Búsqueda, scraping acotado, síntesis (`eda/web_solver.py`) |
+| Spotify | **Opcional:** Web API (`spotipy` + `.env`) o fallback escritorio (URI + atajos) |
 | Memoria | JSON local bajo `memory/` (archivos reales ignorados por Git; hay `.example.json`) |
 | Código | Autoaprendizaje con confirmación, evolution con backup (`eda/evolution.py`) |
 
@@ -47,6 +48,16 @@ Por defecto **no** se llama a ninguna nube. Quien clone el repo no necesita API 
 2. Modo `EDA_REMOTE_LLM_MODE`: `off` | `fallback` | `research` | `code_review` | `research_and_review` (detalle en comentarios de `eda/config.py`).
 
 Estado visible en la GUI (**Configuración**) y en `health_check.py`.
+
+## Spotify (opcional, repo público)
+
+1. App en [Spotify for Developers](https://developer.spotify.com/) — redirect **`http://127.0.0.1:8888/callback`** (o la que definas en `EDA_SPOTIFY_REDIRECT_URI`).
+2. **PKCE (sin client secret):** `EDA_SPOTIFY_CLIENT_ID` + `EDA_SPOTIFY_USE_PKCE=1` en `.env`.  
+   **O** app con secret: `EDA_SPOTIFY_CLIENT_ID` + `EDA_SPOTIFY_CLIENT_SECRET` (no subir a Git).
+3. Primera vez (o token caducado): podés ejecutar `python scripts/spotify_login.py` a mano; el token queda en **`.cache/`** (ignorado por Git). Si falta caché o la API responde **401 / token inválido**, al reproducir música E.D.A. puede **lanzar ese script solo** y reintentar una vez. Desactivar: `EDA_SPOTIFY_AUTO_LOGIN=0` en `.env`.
+4. Sin configuración, E.D.A. sigue usando el **modo escritorio** (como antes). El control remoto vía API suele requerir **Premium** y un cliente Spotify abierto.
+
+`python health_check.py` muestra `spotify_web` y `optional:spotipy`.
 
 ## Documentación y ejemplos
 

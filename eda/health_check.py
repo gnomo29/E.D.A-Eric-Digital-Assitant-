@@ -73,6 +73,7 @@ def run_health_check() -> Dict[str, str]:
         ("screen_brightness_control", "Brillo de pantalla"),
         ("pyperclip", "Portapapeles multimodal"),
         ("win32api", "pywin32 (Win32 opcional)"),
+        ("spotipy", "Spotify Web API opcional"),
     ]
     for mod, _label in optional_modules:
         checks[f"optional:{mod}"] = "ok" if _check_module(mod) else "missing"
@@ -93,6 +94,15 @@ def run_health_check() -> Dict[str, str]:
     checks["permissions_mode"] = "strict" if config.ASK_PERMISSION_FOR_SENSITIVE_ACTIONS else "relaxed"
     checks["remote_llm"] = remote_llm.health_status()
     checks["remote_llm_mode"] = remote_llm.remote_llm_mode()
+
+    try:
+        from eda import spotify_web
+
+        checks["spotify_web"] = spotify_web.describe_integration_status()
+    except Exception as exc:
+        checks["spotify_web"] = f"error:{exc.__class__.__name__}"
+
+    checks["dir:.cache"] = _writable_dir(Path(config.BASE_DIR) / ".cache")
     return checks
 
 

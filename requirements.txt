@@ -1,5 +1,6 @@
 pipwin; platform_system == "Windows"
 # Red y certificados (evita errores HTTPS intermitentes; requests ya las usa; fijamos versiones mínimas)
+python-dotenv>=1.0.0
 requests>=2.32.0
 urllib3>=2.2.0
 certifi>=2024.2.2
@@ -25,3 +26,4 @@ Pillow>=10.4.0
 duckduckgo-search>=6.3.0
 schedule>=1.2.2
 obsws-python
+spotipy>=2.23.0

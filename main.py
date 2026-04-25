@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 
+from eda.utils import ensure_project_dirs, load_env_dotfile
+
+load_env_dotfile()
+
 from eda.gui import EDAGUI
 from eda.logger import get_logger, setup_logging
 from eda.memory import MemoryManager
-from eda.utils import ensure_project_dirs
 
 log = get_logger("main")
 

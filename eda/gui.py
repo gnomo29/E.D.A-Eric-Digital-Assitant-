@@ -37,6 +37,7 @@ from .objective_planner import ObjectivePlan, ObjectivePlanner, PlanStep
 from .optimizer import Optimizer
 from .security_levels import SecurityDecision, SecurityManager
 from .scheduler import ReminderScheduler, parse_reminder_request
+from .spotify_web import is_spotipy_installed, is_web_api_configured, try_play_via_web_api
 from .system_info import SystemInfo
 from .voice import VoiceEngine
 from .web_solver import WebSolver
@@ -114,11 +115,6 @@ class EDAGUI:
 
         self.append_chat_animated("E.D.A.", "Protocolos de inicialización completados. Todos los servicios están en espera.")
         self.append_chat_animated("E.D.A.", "¿Cuáles son sus órdenes, señor?")
-        self.append_chat_animated(
-            "E.D.A.",
-            "Notas rápidas, señor: «aprende a…» investiga y puede proponer código (confirmación SÍ/NO). "
-            "«Quiero que…» enseña reglas seguras. «¿Cómo implementarías…?» arma un plan sin modificar archivos.",
-        )
         self._set_status("En espera")
 
     def _on_close(self) -> None:
@@ -239,7 +235,9 @@ class EDAGUI:
         )
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda _e: self.on_send())
-        self.root.bind("<Control-l>", lambda _e: self.action_clear_chat())
+        # Ctrl+L lo usa Spotify (barra de búsqueda); no enlazarlo aquí o la automatización
+        # de música vacía el chat si el foco vuelve a E.D.A. Limpiar chat: Ctrl+Mayús+L.
+        self.root.bind("<Control-Shift-L>", lambda _e: self.action_clear_chat())
         self.root.bind("<Control-s>", lambda _e: self.action_export_chat())
 
         send_btn = tk.Button(
@@ -269,11 +267,12 @@ class EDAGUI:
             anchor="w", padx=12, pady=(20, 8)
         )
 
+        self._side_button(right, "Guía y ejemplos", self.action_usage_guide)
         self._side_button(right, "Configuración", self.action_config)
         self._side_button(right, "Permisos", self.action_permissions_panel)
         self._side_button(right, "Olvidar patrones", self.action_clear_behavior_patterns)
         self._side_button(right, "Voz siempre ON", self.action_toggle_voice)
-        self._side_button(right, "Limpiar chat", self.action_clear_chat)
+        self._side_button(right, "Limpiar chat (Ctrl+Mayús+L)", self.action_clear_chat)
         self._side_button(right, "Borrar memoria", self.action_clear_memory)
         self._side_button(right, "Exportar chat", self.action_export_chat)
         self._side_button(right, "Evolución", self.action_evolution)
@@ -610,6 +609,8 @@ class EDAGUI:
             extra.append("Automatización de teclado/mouse para tareas en apps")
         if getattr(self.voice, "tts_available", False):
             extra.append("Respuesta hablada siempre activa (modo JARVIS)")
+        if is_spotipy_installed() and is_web_api_configured():
+            extra.append("Spotify vía Web API (spotipy + variables de entorno); sin eso, automatización de escritorio")
 
         lines = [f"- {item}" for item in capabilities + extra]
         return "Estas son mis capacidades actuales, señor:\n" + "\n".join(lines)
@@ -622,6 +623,16 @@ class EDAGUI:
         q = (query or "").strip()
         if not q:
             return False, "No recibí texto de canción para Spotify."
+        # Camino preferido: Web API (token en .cache/, ver .env.example).
+        try:
+            status, detail = try_play_via_web_api(q)
+            if status == "ok":
+                return True, f"web_api:{detail}"
+            if status == "fail":
+                log.info("[SPOTIFY] Web API no pudo reproducir (%s); fallback desktop.", detail)
+        except Exception as exc:
+            log.warning("[SPOTIFY] Web API excepción: %s", exc)
+        # Fallback: escritorio (URI + atajos de teclado).
         # Intento 1: abrir búsqueda directa en Spotify app por URI.
         uri_open = self.actions.open_website(f"spotify:search:{quote_plus(q)}")
         if uri_open.get("status") != "ok":
@@ -630,7 +641,10 @@ class EDAGUI:
             if opened.get("status") != "ok":
                 return False, "No pude abrir Spotify de escritorio."
         self.actions.activate_app_window("spotify")
-        time.sleep(0.9)
+        time.sleep(1.2)
+        # Reafirmar foco en Spotify antes de enviar atajos (si quedan en E.D.A., Ctrl+L/K afectan la GUI).
+        self.actions.activate_app_window("spotify")
+        time.sleep(0.45)
         # Flujo recomendado en desktop: Ctrl+K abre búsqueda rápida; Enter reproduce el resultado.
         # (Ctrl+L también enfoca búsqueda en muchas versiones; probamos ambos.)
         self.mouse_keyboard.hotkey("ctrl", "k")
@@ -656,7 +670,9 @@ class EDAGUI:
         # Último recurso: tecla multimedia play/pause (si hay cola o foco en reproductor).
         self.mouse_keyboard.press("playpause")
         time.sleep(0.2)
-        # Fallback adicional: barra de búsqueda principal (Ctrl+L) y repetir.
+        # Fallback adicional: barra de búsqueda principal (Ctrl+L en Spotify) y repetir.
+        self.actions.activate_app_window("spotify")
+        time.sleep(0.5)
         self.mouse_keyboard.hotkey("ctrl", "l")
         time.sleep(0.25)
         self.mouse_keyboard.hotkey("ctrl", "a")
@@ -1577,6 +1593,64 @@ class EDAGUI:
 
         threading.Thread(target=run_evolution, daemon=True).start()
 
+    def action_usage_guide(self) -> None:
+        """Ventana con la guía de frases y ejemplos (docs/EJEMPLOS_CAPACIDADES_EDA.txt)."""
+        path = config.BASE_DIR / "docs" / "EJEMPLOS_CAPACIDADES_EDA.txt"
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            body = (
+                "(No se encontró docs/EJEMPLOS_CAPACIDADES_EDA.txt en el proyecto.)\n\n"
+                "«aprende a …» investiga y puede proponer código (confirmación SÍ/NO).\n"
+                "«Quiero que …» enseña reglas de automatización seguras.\n"
+                "«¿Cómo implementarías …?» o «Planea cómo cumplir …» arma un plan sin modificar archivos.\n"
+            )
+
+        win = tk.Toplevel(self.root)
+        win.title("E.D.A. — Guía de uso y ejemplos")
+        win.configure(bg=config.THEME_PANEL)
+        win.geometry("760x580")
+        outer = tk.Frame(win, bg=config.THEME_PANEL)
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(
+            outer,
+            text="Frases de ejemplo y capacidades (también en docs/EJEMPLOS_CAPACIDADES_EDA.txt)",
+            bg=config.THEME_PANEL,
+            fg=config.THEME_TEXT,
+            font=("Consolas", 11, "bold"),
+            wraplength=720,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 6))
+
+        box = scrolledtext.ScrolledText(
+            outer,
+            wrap="word",
+            font=("Consolas", 10),
+            bg="#070b19",
+            fg="#e3f8ff",
+            insertbackground=config.THEME_TEXT,
+            relief="flat",
+            height=28,
+        )
+        box.pack(fill="both", expand=True)
+        box.insert("1.0", body)
+        box.config(state="disabled")
+
+        btn_row = tk.Frame(outer, bg=config.THEME_PANEL)
+        btn_row.pack(fill="x", pady=(10, 0))
+        tk.Button(
+            btn_row,
+            text="Cerrar",
+            command=win.destroy,
+            bg="#1b274f",
+            fg="white",
+            relief="flat",
+            padx=16,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="right")
+
     def action_config(self) -> None:
         mem = self.memory.get_memory()
         prefs = mem.get("preferences", {})
@@ -1746,7 +1820,11 @@ class EDAGUI:
         self.append_chat_animated("E.D.A.", "Modo voz permanente activo, señor.")
 
     def action_clear_chat(self) -> None:
-        confirmed = messagebox.askyesno("Limpiar chat", "¿Desea limpiar el historial visual del chat?")
+        confirmed = messagebox.askyesno(
+            "Limpiar chat",
+            "¿Desea limpiar el historial visual del chat?\n\n"
+            "(Atajo de teclado: Ctrl+Mayús+L — evita conflicto con Spotify, que usa Ctrl+L en búsqueda.)",
+        )
         if not confirmed:
             return
         self.chat_box.config(state="normal")

@@ -4,6 +4,15 @@
   lo que tengas instalado (Spotify desktop, OBS, etc.).
 ================================================================================
 
+--- 0. Frases útiles (resumen) ---
+  «aprende a …» — investiga y puede proponer código (confirmación SÍ / NO / VER CÓDIGO).
+  «Quiero que … cada vez que diga …» — enseña reglas de automatización seguras.
+  «¿Cómo implementarías …?» o «Planea cómo cumplir …» — arma un plan sin modificar archivos
+    (capability_plan / mejoras).
+
+  La guía completa está en este archivo; en la GUI usá el botón «Guía y ejemplos».
+
+
 --- 1. Conversación y preguntas (Ollama) ---
   Hola, ¿qué puedes hacer?
   Explícame qué es un condensador
