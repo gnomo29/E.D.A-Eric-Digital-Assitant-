@@ -1,4 +1,3 @@
-pipwin; platform_system == "Windows"
 # Red y certificados (evita errores HTTPS intermitentes; requests ya las usa; fijamos versiones mínimas)
 python-dotenv>=1.0.0
 requests>=2.32.0
@@ -9,7 +8,6 @@ beautifulsoup4>=4.12.3
 ollama>=0.3.3
 pyttsx3>=2.90
 SpeechRecognition>=3.10.4
-pyaudio>=0.2.14; platform_system == "Windows"
 pyautogui>=0.9.54
 pygetwindow>=0.0.9
 psutil>=5.9.8
@@ -27,3 +25,9 @@ duckduckgo-search>=6.3.0
 schedule>=1.2.2
 obsws-python
 spotipy>=2.23.0
+edge-tts>=6.1.10
+cryptography>=43.0.0
+python-docx>=1.1.2
+pypdf>=5.0.1
+python-pptx>=1.0.2
+win10toast>=0.9; platform_system == "Windows"

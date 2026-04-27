@@ -1,0 +1,39 @@
+{
+  "plugins": [
+    {
+      "name": "example_skill",
+      "file": "example_skill.py",
+      "enabled": true,
+      "permissions": [
+        "web.open"
+      ]
+    },
+    {
+      "name": "creative_blender",
+      "file": "creative_blender.py",
+      "enabled": true,
+      "permissions": [
+        "process.spawn",
+        "file.write"
+      ]
+    },
+    {
+      "name": "document_specialist",
+      "file": "document_specialist.py",
+      "enabled": true,
+      "permissions": [
+        "file.read",
+        "file.write"
+      ]
+    },
+    {
+      "name": "gaming_specialist",
+      "file": "gaming_specialist.py",
+      "enabled": true,
+      "permissions": [
+        "app.launch",
+        "uri.open"
+      ]
+    }
+  ]
+}

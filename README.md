@@ -267,6 +267,43 @@ python -m unittest discover -s tests -p "test_*.py"
 
 La suite actual incluye **72+ tests** unitarios/integración para intents, orquestador, calidad de respuesta, voz y detección Web/App.
 
+## Seguridad Enterprise/PRO (v2.0)
+
+- **Zero Trust input validation:** sanitización global para comandos, targets de apps y navegación web.
+- **Aprobación PRO en acciones críticas:** para `ejecuta comando`, movimientos y borrados, el orquestador exige confirmación explícita `Sí/No` con vista previa de impacto.
+- **Sandbox de habilidades aprendidas:** ejecución aislada de tareas aprendidas con timeout de 30 segundos.
+- **Redacción automática de secretos/PII:** emails, tokens y credenciales se reemplazan por `[REDACTED]` en logs y persistencia.
+- **Memoria cifrada en reposo:** persistencia protegida con `Fernet` (si `cryptography` está disponible) y fallback compatible.
+
+## Plugins (skills)
+
+- Carpeta runtime: `skills/`
+- Registro de permisos y estado: `skills/manifest.json`
+- Cada plugin `.py` debe exponer funciones seguras (ejemplo: `skills/example_skill.py`).
+- Carga recomendada desde `eda.plugin_loader.PluginLoader`.
+
+## Modo Híbrido y Especialistas
+
+- **Modo híbrido online/offline:** `EDACore` desactiva fallback web automáticamente sin conectividad.
+- **Especialista Creativo (Blender):** `skills/creative_blender.py` genera scripts y ejecuta `blender --background --python ...` con guard de RAM.
+- **Especialista Documental:** `skills/document_specialist.py` crea `.docx`, extrae PDF y genera `.pptx`.
+- **Especialista Gaming:** `skills/gaming_specialist.py` soporta URIs Steam (`steam://run/<id>`) y detección local de clientes.
+- **Recordatorios locales:** `src/eda/background_tasks.py` preparado para alertas de escritorio en Windows.
+
+## Manual de v3.0: Seguridad, Móvil y Recuperación
+
+- **Firma obligatoria de skills:** usa `python tools/sign_skill.py` para generar llaves locales y firmar `skills/*.py` + `skills/manifest.json`.  
+  El cargador (`eda.plugin_loader.PluginLoader`) rechaza plugins sin firma válida.
+- **Sandbox reforzado:** habilidades aprendidas se ejecutan con timeout y límites de recursos (CPU/memoria) en plataformas compatibles.
+- **Undo Manager:** `Deshaz lo último` revierte la última operación de movimiento registrada en `undo_history.db`.
+- **Recordatorios resilientes:** persistencia en `reminders.db` con recuperación automática tras reinicio.
+  - `Listar recordatorios`
+  - `Cancelar recordatorio <ID>`
+- **Conector móvil Opt-In:** antes de usar mensajes móviles, E.D.A. pide consentimiento y configuración de token.
+  - `enviar mensaje al móvil: ...`
+  - `configurar móvil: telegram|TOKEN|CHAT_ID`
+- **Token cifrado:** credenciales móviles se guardan cifradas localmente con el motor de secretos.
+
 - Diagnóstico de entorno:
 ```bash
 python health_check.py

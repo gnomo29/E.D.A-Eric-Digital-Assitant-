@@ -1,0 +1,544 @@
+"""Orquestador unificado de comandos para las interfaces de E.D.A."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Callable
+from urllib.parse import quote_plus
+from pathlib import Path
+
+from .logger import get_logger
+from .nlp_utils import detect_confirmation, parse_command
+from .spotify_web import try_play_via_web_api
+from .vision import VisionService
+from .background_tasks import BackgroundReminderWorker
+from .connectors.mobile import MobileConnector
+from skills.document_specialist import create_presentation
+
+log = get_logger("orchestrator")
+
+
+@dataclass
+class OrchestrationResult:
+    """Resultado de una decisión del orquestador."""
+
+    handled: bool
+    answer: str
+    source: str
+
+
+class CommandOrchestrator:
+    """
+    Cerebro compartido para decidir cómo resolver un comando.
+
+    El orden de decisión es:
+    1) ActionAgent (tareas aprendidas/dinámicas)
+    2) Comandos de navegación
+    3) Intents estructurados (open/close/volume/brightness/system/web)
+    4) Fallback a Core.ask (Ollama/LLM local)
+    """
+
+    def __init__(
+        self,
+        *,
+        memory: Any,
+        core: Any,
+        action_agent: Any,
+        actions: Any,
+        system_info: Any | None = None,
+        web_solver: Any | None = None,
+        can_execute: Callable[[str], bool] | None = None,
+        vision: Any | None = None,
+    ) -> None:
+        self.memory = memory
+        self.core = core
+        self.action_agent = action_agent
+        self.actions = actions
+        self.system_info = system_info
+        self.web_solver = web_solver
+        self.can_execute = can_execute
+        self.vision = vision or VisionService()
+        self._pending_organization_plan: dict[str, Any] | None = None
+        self._pending_risky_action: dict[str, str] | None = None
+        self._pending_mobile_opt_in = False
+        self.mobile_connector = MobileConnector()
+        self.reminder_worker = BackgroundReminderWorker()
+        self.reminder_worker.start()
+
+    @staticmethod
+    def _split_app_query(entity: str) -> tuple[str, str]:
+        if not entity:
+            return "", ""
+        if "|||" not in entity:
+            return "", entity
+        app, query = entity.split("|||", 1)
+        return app.strip(), query.strip()
+
+    def orchestrate(self, text: str) -> OrchestrationResult:
+        clean = (text or "").strip()
+        if not clean:
+            return OrchestrationResult(True, "", "empty")
+        low = clean.lower()
+
+        if low in {"deshaz lo último", "deshaz lo ultimo"}:
+            result = self.actions.undo_last_action()
+            return OrchestrationResult(True, result.get("message", ""), "undo_last_action")
+
+        if low.startswith("listar recordatorios"):
+            reminders = self.reminder_worker.list_reminders()
+            if not reminders:
+                return OrchestrationResult(True, "No hay recordatorios pendientes.", "list_reminders")
+            lines = [f"#{r['id']} -> {r['message']}" for r in reminders[:20]]
+            return OrchestrationResult(True, "Recordatorios:\n" + "\n".join(lines), "list_reminders")
+
+        if low.startswith("cancelar recordatorio"):
+            match = re.search(r"(\d+)", low)
+            if not match:
+                return OrchestrationResult(True, "Necesito el ID del recordatorio a cancelar.", "cancel_reminder")
+            ok = self.reminder_worker.cancel_reminder(int(match.group(1)))
+            return OrchestrationResult(True, "Recordatorio cancelado." if ok else "No encontré ese recordatorio.", "cancel_reminder")
+
+        if low.startswith("enviar mensaje al móvil") or low.startswith("enviar mensaje al movil"):
+            if not self.mobile_connector.config.enabled:
+                self._pending_mobile_opt_in = True
+                return OrchestrationResult(
+                    True,
+                    "Para enviarte mensajes al móvil, necesito que habilites el servicio con tu Token. ¿Deseas configurarlo?",
+                    "mobile_opt_in_prompt",
+                )
+            payload = clean.split(":", 1)[1].strip() if ":" in clean else "Mensaje desde E.D.A."
+            result = self.mobile_connector.enviar_mensaje(payload)
+            return OrchestrationResult(True, result.get("message", ""), "mobile_send")
+
+        if self._pending_mobile_opt_in:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                self._pending_mobile_opt_in = False
+                return OrchestrationResult(
+                    True,
+                    "Configuración pendiente: usa 'configurar móvil: telegram|<TOKEN>|<CHAT_ID>' o pushbullet.",
+                    "mobile_opt_in_accepted",
+                )
+            if decision is False:
+                self._pending_mobile_opt_in = False
+                return OrchestrationResult(True, "Perfecto, mantengo el conector móvil desactivado.", "mobile_opt_in_rejected")
+            return OrchestrationResult(True, "Responde Sí o No para configurar el conector móvil.", "mobile_opt_in_wait")
+
+        if low.startswith("configurar móvil:") or low.startswith("configurar movil:"):
+            raw = clean.split(":", 1)[1].strip()
+            parts = [p.strip() for p in raw.split("|")]
+            if len(parts) < 2:
+                return OrchestrationResult(True, "Formato: configurar móvil: telegram|TOKEN|CHAT_ID", "mobile_config_invalid")
+            provider = parts[0].lower()
+            token = parts[1]
+            chat_id = parts[2] if len(parts) >= 3 else ""
+            self.mobile_connector.save_opt_in(provider=provider, token=token, telegram_chat_id=chat_id)
+            return OrchestrationResult(True, "Conector móvil configurado en modo Opt-In.", "mobile_configured")
+
+        if self.can_execute and not self.can_execute(clean):
+            return OrchestrationResult(True, "Acción bloqueada por permisos/configuración.", "security")
+
+        if self._pending_risky_action is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                approved_text = self._pending_risky_action.get("user_text", "")
+                self._pending_risky_action = None
+                handled, answer = self.action_agent.try_handle(approved_text)
+                if handled:
+                    return OrchestrationResult(True, answer, "approved_risky_action")
+                return OrchestrationResult(True, "No pude ejecutar la acción aprobada.", "approved_risky_action")
+            if decision is False:
+                self._pending_risky_action = None
+                return OrchestrationResult(True, "Acción cancelada por seguridad.", "risky_action_cancelled")
+            return OrchestrationResult(
+                True,
+                "Hay una acción crítica pendiente. Responde Sí para ejecutar o No para cancelar.",
+                "risky_action_waiting_confirmation",
+            )
+
+        risk_preview = self._build_risk_preview(clean)
+        if risk_preview:
+            self._pending_risky_action = {"user_text": clean, "preview": risk_preview}
+            return OrchestrationResult(
+                True,
+                f"[Aprobación PRO requerida]\n{risk_preview}\n¿Confirmas ejecución? (Sí/No)",
+                "risky_action_requires_confirmation",
+            )
+
+        if self._pending_organization_plan is not None:
+            confirmation = detect_confirmation(clean)
+            if confirmation is True:
+                result = self.actions.apply_directory_organization_plan(self._pending_organization_plan)
+                self._pending_organization_plan = None
+                return OrchestrationResult(True, result.get("message", "Plan aplicado."), "organize_directory_apply")
+            if confirmation is False:
+                self._pending_organization_plan = None
+                return OrchestrationResult(True, "Listo, cancelé la organización de archivos.", "organize_directory_cancel")
+            return OrchestrationResult(
+                True,
+                "Tengo una organización pendiente. Responde 'sí' para ejecutar o 'no' para cancelar.",
+                "organize_directory_waiting_confirmation",
+            )
+
+        handled, answer = self.action_agent.try_handle(clean)
+        if handled:
+            return OrchestrationResult(True, answer, "action_agent")
+
+        nav = self.actions.execute_navigation_command(clean)
+        if nav is not None:
+            return OrchestrationResult(True, nav.get("message", "Comando de navegación ejecutado."), "navigation")
+
+        parsed = parse_command(clean)
+        intent = parsed.intent
+        log.info("[ORCHESTRATOR] Intent detected: %s | entity=%s", intent, parsed.entity)
+
+        if intent in {
+            "theoretical_question",
+            "technical_question",
+            "general_knowledge_question",
+            "explanation_request",
+            "debugging_request",
+        }:
+            response_instruction = self._response_instruction_for_intent(intent)
+            use_web = self._should_use_web_for_question(clean, intent)
+            route = "core_direct_answer" if not use_web else "core_web_allowed"
+            log.info("[ORCHESTRATOR] Route: %s", route)
+            mem = self.memory.get_memory()
+            history = mem.get("chat_history", []) or mem.get("history", [])
+            answer = self.core.ask(
+                clean,
+                history=history,
+                allow_web_fallback=use_web,
+                response_instruction=response_instruction,
+            )
+            if not use_web:
+                log.info("[ORCHESTRATOR] Fallback: web search not used")
+            return OrchestrationResult(True, answer, "knowledge_answer")
+
+        if intent in {"play_music", "open_and_play_music"}:
+            app, query = self._split_app_query(parsed.entity)
+            track_query = query if query else (parsed.entity or clean)
+            log.info("[ORCHESTRATOR] Route: spotify_playback")
+            return OrchestrationResult(True, self._route_play_music(track_query, preferred_app=app), "play_music")
+
+        if intent in {"search_in_app", "open_and_search_in_app"}:
+            app, query = self._split_app_query(parsed.entity)
+            if not query:
+                query = clean
+            if not app:
+                app = "steam" if "steam" in clean.lower() else "spotify"
+            log.info("[ORCHESTRATOR] Route: search_in_app (%s)", app)
+            return OrchestrationResult(True, self._route_search_in_app(app, query), "search_in_app")
+
+        if intent == "screen_comprehension":
+            log.info("[ORCHESTRATOR] Route: screen_comprehension")
+            return OrchestrationResult(True, self._route_screen_comprehension(clean), "screen_comprehension")
+
+        if intent == "organize_directory":
+            log.info("[ORCHESTRATOR] Route: organize_directory")
+            return OrchestrationResult(True, self._route_organize_directory(parsed.entity, clean), "organize_directory_plan")
+
+        if intent == "create_presentation":
+            log.info("[ORCHESTRATOR] Route: create_presentation")
+            return OrchestrationResult(True, self._route_create_presentation(parsed.entity or clean), "create_presentation")
+
+        if intent == "open_app":
+            target = parsed.entity or clean
+            try:
+                result = self.actions.open_app(target)
+            except FileNotFoundError:
+                result = {"status": "error", "message": "File not found"}
+            except Exception as exc:
+                result = {"status": "error", "message": str(exc)}
+            if result.get("status") == "ok":
+                return OrchestrationResult(True, result.get("message", "Aplicación abierta."), "open_app")
+            web_candidate = self.actions._resolve_web_target_url(target)
+            if web_candidate:
+                web_result = self.actions.open_website(web_candidate)
+                if web_result.get("status") == "ok":
+                    return OrchestrationResult(
+                        True,
+                        f"No encontré app local para {target}. Lo abrí en navegador.",
+                        "open_app_web_fallback",
+                    )
+            if self.web_solver is not None:
+                solved = self.web_solver.solve(f"buscar {target}", auto_save_code=False)
+                return OrchestrationResult(
+                    True,
+                    solved.get("answer", f"No encontré app local para {target}; intenté búsqueda de apoyo."),
+                    "open_app_search_fallback",
+                )
+            fallback_url = f"https://www.google.com/search?q={quote_plus(target)}&hl=es"
+            self.actions.open_website(fallback_url)
+            return OrchestrationResult(True, "No identifiqué la app; abrí búsqueda web como fallback.", "open_app_fallback")
+
+        if intent == "close_app":
+            target = parsed.entity or clean
+            result = self.actions.close_app(target)
+            return OrchestrationResult(True, result.get("message", "Intenté cerrar la aplicación."), "close_app")
+
+        if intent == "volume":
+            return OrchestrationResult(True, self._handle_volume(clean), "volume")
+
+        if intent == "brightness":
+            return OrchestrationResult(True, self._handle_brightness(clean), "brightness")
+
+        if intent in {"search_web", "search_request", "arduino_help"} and self.web_solver is not None:
+            solved = self.web_solver.solve(clean, auto_save_code=True)
+            return OrchestrationResult(True, solved.get("answer", "No tengo respuesta por ahora."), "web_solver")
+
+        if intent == "system_info" and self.system_info is not None:
+            m = self.system_info.get_metrics()
+            answer = f"CPU {m.get('cpu')} | RAM {m.get('ram')} | Hora {m.get('time')} | Ollama {m.get('ollama', 'N/D')}"
+            return OrchestrationResult(True, answer, "system_info")
+
+        mem = self.memory.get_memory()
+        history = mem.get("chat_history", []) or mem.get("history", [])
+        answer = self.core.ask(clean, history=history)
+        return OrchestrationResult(True, answer, "core")
+
+    @staticmethod
+    def _build_risk_preview(text: str) -> str:
+        lowered = (text or "").lower()
+        if "ejecuta comando:" in lowered or lowered.startswith("corre comando:"):
+            return (
+                f"Comando solicitado: {text}\n"
+                "Efectos previstos: ejecución de terminal con cambios potenciales en sistema/archivos."
+            )
+        if "mueve archivo:" in lowered:
+            return (
+                f"Acción solicitada: {text}\n"
+                "Efectos previstos: movimiento de archivos/directorios; puede alterar rutas originales."
+            )
+        if any(k in lowered for k in ["borra", "elimina", "rm ", "del "]):
+            return (
+                f"Acción solicitada: {text}\n"
+                "Efectos previstos: eliminación de datos potencialmente irreversible."
+            )
+        return ""
+
+    @staticmethod
+    def _response_instruction_for_intent(intent: str) -> str:
+        if intent == "technical_question":
+            return (
+                "Responde en estilo técnico y claro: 1) definición, 2) cómo funciona, "
+                "3) ejemplo corto, 4) cuándo se usa. Evita relleno conversacional."
+            )
+        if intent == "debugging_request":
+            return (
+                "Responde como diagnóstico técnico: causa probable, pasos de verificación, "
+                "solución sugerida y advertencias. Sé concreto."
+            )
+        if intent == "explanation_request":
+            return (
+                "Responde con resumen breve + explicación desarrollada + ejemplo práctico. "
+                "Evita metáforas innecesarias."
+            )
+        if intent == "theoretical_question":
+            return "Responde de forma directa, precisa y breve. Sin texto irrelevante."
+        if intent == "general_knowledge_question":
+            return (
+                "Responde con dato directo y contexto mínimo útil. Si hay incertidumbre, dilo claramente "
+                "y ofrece ampliar."
+            )
+        return "Responde claro y directo."
+
+    @staticmethod
+    def _should_use_web_for_question(text: str, intent: str) -> bool:
+        lowered = (text or "").lower()
+        if intent == "search_request":
+            return True
+        explicit_web = ("busca en web" in lowered) or ("según internet" in lowered) or ("verifica en línea" in lowered)
+        if explicit_web:
+            return True
+        freshness_markers = ("hoy", "actualmente", "última", "ultima", "reciente", "este año", "2026", "noticia")
+        return any(marker in lowered for marker in freshness_markers)
+
+    def _route_play_music(self, query: str, preferred_app: str = "") -> str:
+        q = (query or "").strip()
+        if not q:
+            return "Necesito el nombre de la canción, artista o álbum para reproducir."
+
+        app = (preferred_app or "spotify").lower().strip()
+        if app and app != "spotify":
+            # Hoy la ruta robusta de reproducción está integrada para Spotify.
+            log.info("[ORCHESTRATOR] Fallback to spotify for playback (preferred_app=%s)", app)
+
+        self.actions.open_app("spotify")
+
+        # Prioridad 1: Spotify Web API (si está configurada y hay dispositivo activo).
+        try:
+            status, detail = try_play_via_web_api(q)
+            if status == "ok":
+                log.info("[ORCHESTRATOR] Playback success via spotify_web_api")
+                return f"Reproduciendo {q} en Spotify."
+            log.info("[ORCHESTRATOR] spotify_web_api status=%s detail=%s", status, detail)
+        except Exception as exc:
+            log.warning("[ORCHESTRATOR] spotify_web_api exception: %s", exc)
+
+        # Prioridad 2: URI de Spotify para abrir búsqueda en cliente.
+        uri = f"spotify:search:{quote_plus(q)}"
+        opened_uri = self.actions.open_website(uri)
+        if opened_uri.get("status") == "ok":
+            log.info("[ORCHESTRATOR] Fallback route used: spotify_uri_search")
+            return f"Abrí Spotify y dejé lista la búsqueda de {q} para reproducción."
+
+        # Prioridad 3: Web de Spotify como último fallback.
+        web_url = f"https://open.spotify.com/search/{quote_plus(q)}/tracks"
+        self.actions.open_website(web_url)
+        log.info("[ORCHESTRATOR] Fallback route used: spotify_web_search")
+        return f"No pude reproducir directamente; abrí Spotify con resultados para {q}."
+
+    def _route_search_in_app(self, app_name: str, query: str) -> str:
+        app = (app_name or "").strip().lower()
+        q = (query or "").strip()
+        if not app or not q:
+            return "Necesito app y término de búsqueda para completar esa acción."
+
+        if app == "steam":
+            self.actions.open_app("steam")
+            steam_uri = f"steam://openurl/https://store.steampowered.com/search/?term={quote_plus(q)}"
+            result = self.actions.open_website(steam_uri)
+            if result.get("status") == "ok":
+                log.info("[ORCHESTRATOR] Route: steam_in_app_search")
+                return f"Abrí Steam y ejecuté la búsqueda interna de {q}."
+            self.actions.open_website(f"https://store.steampowered.com/search/?term={quote_plus(q)}")
+            log.info("[ORCHESTRATOR] Fallback: steam_web_search")
+            return f"Abrí Steam Store con la búsqueda de {q}."
+
+        if app == "spotify":
+            return self._route_play_music(q, preferred_app="spotify")
+
+        self.actions.open_app(app)
+        # Fallback genérico para apps sin integración específica.
+        self.actions.open_website(f"https://www.google.com/search?q={quote_plus(q)}")
+        log.info("[ORCHESTRATOR] Fallback: generic_web_search_for_app=%s", app)
+        return f"Abrí {app}; no tengo búsqueda interna dedicada, así que abrí búsqueda de apoyo para {q}."
+
+    def _route_screen_comprehension(self, text: str) -> str:
+        prompt = text.strip()
+        result = self.vision.analyze_screen(prompt=prompt)
+        if result.get("status") != "ok":
+            return result.get("message", "No pude analizar la pantalla.")
+        model = result.get("model", "modelo de visión")
+        return f"[Visión {model}] {result.get('message', '').strip()}"
+
+    def _route_organize_directory(self, entity: str, text: str) -> str:
+        target = (entity or "").strip()
+        if not target:
+            target = self._extract_directory_target(text)
+        if not target:
+            target = "~/Downloads"
+
+        plan = self.actions.plan_directory_organization(target)
+        if plan.get("status") != "ok":
+            return str(plan.get("message", "No pude preparar la organización."))
+
+        moves = plan.get("moves", [])
+        if not isinstance(moves, list) or not moves:
+            return str(plan.get("message", "No hay archivos para organizar."))
+
+        self._pending_organization_plan = plan
+        preview = self._summarize_move_plan(moves)
+        return (
+            f"{plan.get('message', 'Plan preparado.')} {preview} "
+            "¿Procedo con el movimiento real? Responde sí o no."
+        )
+
+    @staticmethod
+    def _extract_directory_target(text: str) -> str:
+        cleaned = re.sub(r"^\s*(organiza|ordena|clasifica|limpia)\s+", "", text, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"^(la\s+carpeta|carpeta|directorio)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+        return cleaned.strip(" .")
+
+    @staticmethod
+    def _summarize_move_plan(moves: list[Any]) -> str:
+        by_bucket: dict[str, int] = {}
+        for move in moves:
+            if not isinstance(move, dict):
+                continue
+            bucket = str(move.get("bucket", "")).strip() or "otros"
+            by_bucket[bucket] = by_bucket.get(bucket, 0) + 1
+        if not by_bucket:
+            return ""
+        chunks = [f"{count} {bucket.lower()}" for bucket, count in sorted(by_bucket.items())]
+        return "Voy a mover " + ", ".join(chunks) + "."
+
+    def _route_create_presentation(self, text: str) -> str:
+        lowered = (text or "").lower()
+        slides_match = re.search(r"(\d+)\s+diaposit", lowered)
+        slide_count = int(slides_match.group(1)) if slides_match else 5
+        topic = re.sub(r".*sobre\s+", "", text, flags=re.IGNORECASE).strip(" .")
+        if not topic:
+            topic = "Tema general"
+        safe_topic = re.sub(r"[^a-zA-Z0-9_-]+", "_", topic)[:40]
+        output = str(Path("data") / "exports" / f"presentacion_{safe_topic}.pptx")
+        result = create_presentation(topic=topic, slides=slide_count, output_path=output)
+        if result.get("status") == "ok":
+            return f"Presentación creada: {result.get('message')}"
+        return f"No pude crear la presentación: {result.get('message', 'error desconocido')}"
+
+    def persist(self, user_text: str, answer: str, record_behavior: bool = True) -> None:
+        self.memory.add_history(user_text, answer)
+        if not record_behavior:
+            return
+        try:
+            parsed = parse_command(user_text)
+            self.memory.record_behavior_event(parsed.intent, parsed.entity, user_text)
+        except Exception:
+            pass
+
+    def _handle_volume(self, text: str) -> str:
+        low = (text or "").lower()
+        if any(word in low for word in ["mutea", "mutear", "silencia", "silenciar"]):
+            result = self.actions.set_mute(True)
+            return result.get("message", "No pude silenciar el audio.")
+        if any(word in low for word in ["desmutea", "desmutear", "quita el mute", "activar sonido", "reactivar sonido"]):
+            result = self.actions.set_mute(False)
+            return result.get("message", "No pude reactivar el audio.")
+
+        number_match = re.search(r"(\d{1,3})", low)
+        if number_match:
+            target = int(number_match.group(1))
+            result = self.actions.set_volume(target)
+            return result.get("message", "Volumen ajustado.")
+
+        if "sube" in low or "subir" in low:
+            delta_match = re.search(r"(\d{1,2})", low)
+            delta = int(delta_match.group(1)) if delta_match else 10
+            result = self.actions.adjust_volume(delta)
+            return result.get("message", f"Volumen aumentado {delta}%.")
+
+        if "baja" in low or "bajar" in low:
+            delta_match = re.search(r"(\d{1,2})", low)
+            delta = int(delta_match.group(1)) if delta_match else 10
+            result = self.actions.adjust_volume(-delta)
+            return result.get("message", f"Volumen reducido {delta}%.")
+
+        result = self.actions.set_volume(50)
+        return result.get("message", "Volumen ajustado a 50%.")
+
+    def _handle_brightness(self, text: str) -> str:
+        low = (text or "").lower()
+        number_match = re.search(r"(\d{1,3})", low)
+        if number_match:
+            target = int(number_match.group(1))
+            result = self.actions.set_brightness(target)
+            return result.get("message", "Brillo ajustado.")
+
+        if "sube" in low or "subir" in low:
+            delta_match = re.search(r"(\d{1,2})", low)
+            delta = int(delta_match.group(1)) if delta_match else 10
+            result = self.actions.adjust_brightness(delta)
+            return result.get("message", f"Brillo aumentado {delta}%.")
+
+        if "baja" in low or "bajar" in low:
+            delta_match = re.search(r"(\d{1,2})", low)
+            delta = int(delta_match.group(1)) if delta_match else 10
+            result = self.actions.adjust_brightness(-delta)
+            return result.get("message", f"Brillo reducido {delta}%.")
+
+        result = self.actions.set_brightness(70)
+        return result.get("message", "Brillo ajustado a 70%.")
+
