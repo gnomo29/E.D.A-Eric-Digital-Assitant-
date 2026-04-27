@@ -1,131 +1,298 @@
-# E.D.A. — Enhanced Digital Assistant
+# E.D.A. (Eric Digital Assistant)
 
-Asistente de escritorio estilo JARVIS (Windows 10/11 principalmente; en Linux/macOS parte de las funciones se degrada con elegancia).
+Asistente de IA local para escritorio con interfaz gráfica, comandos por texto/voz, automatización de tareas y módulos de observación del sistema. Está orientado a uso personal en Windows y Linux, con un perfil de ejecución razonable para equipos con 8 GB de RAM.
 
-## Qué hace
+## Inicio rápido (recomendado)
 
-| Área | Detalle breve |
-|------|----------------|
-| Interfaz | GUI `tkinter`, chat, panel de estado |
-| IA local | [Ollama](https://ollama.com) (`eda/core.py`) — modelo por defecto en `eda/config.py` |
-| IA remota | **Opcional** — API compatible OpenAI; ver `.env.example` y sección *LLM remoto* |
-| Voz | TTS (`pyttsx3`) + STT (`speech_recognition`) en español |
-| Sistema | Apps, volumen, brillo, Bluetooth, optimización (`eda/actions.py`, etc.) |
-| Web | Búsqueda, scraping acotado, síntesis (`eda/web_solver.py`) |
-| Spotify | **Opcional:** Web API (`spotipy` + `.env`) o fallback escritorio (URI + atajos) |
-| Memoria | JSON local bajo `memory/` (archivos reales ignorados por Git; hay `.example.json`) |
-| Código | Autoaprendizaje con confirmación, evolution con backup (`eda/evolution.py`) |
-
-## Inicio rápido
+- **Windows:** haz doble clic en `INICIAR_ASISTENTE.bat` y listo.
+- **Linux/macOS:** ejecuta:
 
 ```bash
-cd EDA_Project
-python -m venv venv312
-venv312\Scripts\activate
-pip install -r requirements.txt
-python main.py
+chmod +x iniciar.sh
+./iniciar.sh
 ```
 
-**Windows — instalación automática:** con **`scripts/windows/INSTALAR_EDA.cmd`** podés instalar **todo de una vez**: comprueba **Python 3.12** (`py -3.12`), recrea el entorno **`venv312`**, instala **`requirements.txt`**, intenta **PyAudio** (pipwin / pip) y al final puede lanzar la GUI. Ejecutalo con doble clic o desde `cmd` en la raíz del repo. Para el día a día, **`scripts/windows/Iniciar_EDA.bat`** solo activa `venv312` y arranca `python main.py` (Ollama se intenta en segundo plano).
+El lanzador unificado:
+- detecta dependencias faltantes y ofrece instalarlas,
+- verifica estado de Ollama,
+- abre directamente la interfaz principal legacy mejorada.
 
-**CLI de prueba:** `python main.py --cli`
+## Features
 
-**Tests:** `python -m unittest discover -s tests -p "test_*.py"`
+- **GUI legacy mejorada** (`EDAGUI`) como interfaz única del proyecto.
+- **Modo voz completo**: STT (entrada por micrófono) + TTS (respuesta hablada).
+- **Control de sistema**: abrir/cerrar apps, volumen, brillo, ventanas, USB y acciones guiadas.
+- **Aprendizaje de tareas** con persistencia local (SQLite + JSON) y reutilización por trigger.
+- **Web solver** para investigación técnica y generación de soluciones/código de apoyo.
+- **Permisos y confirmaciones** para acciones sensibles desde la interfaz.
+- **Scripts de operación** para bootstrap, health check, build y limpieza de runtime.
 
-**Salud del entorno:** `python health_check.py`
+## Requisitos críticos
 
-## Ollama
+- Python **3.12** (recomendado/objetivo principal del entorno `.venv`).
+- `pip` actualizado.
+- Windows 10/11 o Linux.
 
-1. Instalar Ollama y ejecutar `ollama serve`.
-2. `ollama pull llama3.2:1b` (o el modelo definido en `OLLAMA_MODEL` dentro de `eda/config.py`).
-3. Si Ollama no está, E.D.A. usa fallbacks (web / mensaje degradado) según el flujo.
+## Requisitos previos
 
-## LLM remoto (opcional)
+- Python **3.10+** (compatibilidad general), con preferencia operativa por **3.12**.
+- `pip` actualizado.
+- Sistema operativo:
+  - **Windows 10/11** (soporte principal).
+  - **Linux** (soporte parcial según dependencias de audio/GUI).
+- (Opcional) [Ollama](https://ollama.com/) para respuestas locales con LLM.
+- Micrófono y salida de audio si usarás voz.
 
-Por defecto **no** se llama a ninguna nube. Quien clone el repo no necesita API keys.
+### Si no tienes Python instalado
 
-1. Copiar `.env.example` → `.env` y completar `EDA_REMOTE_LLM_*`, **o** exportar las mismas variables en el sistema.
-2. Modo `EDA_REMOTE_LLM_MODE`: `off` | `fallback` | `research` | `code_review` | `research_and_review` (detalle en comentarios de `eda/config.py`).
+- Descarga Python desde [python.org](https://www.python.org/downloads/).
+- En Windows, activa la opción **Add Python to PATH** durante la instalación.
+- Verifica instalación:
 
-Estado visible en la GUI (**Configuración**) y en `health_check.py`.
+```bash
+python --version
+pip --version
+```
 
-## Spotify (opcional, repo público)
+## Installation
 
-1. App en [Spotify for Developers](https://developer.spotify.com/) — redirect **`http://127.0.0.1:8888/callback`** (o la que definas en `EDA_SPOTIFY_REDIRECT_URI`).
-2. **PKCE (sin client secret):** `EDA_SPOTIFY_CLIENT_ID` + `EDA_SPOTIFY_USE_PKCE=1` en `.env`.  
-   **O** app con secret: `EDA_SPOTIFY_CLIENT_ID` + `EDA_SPOTIFY_CLIENT_SECRET` (no subir a Git).
-3. Primera vez (o token caducado): podés ejecutar `python scripts/spotify_login.py` a mano; el token queda en **`.cache/`** (ignorado por Git). Si falta caché o la API responde **401 / token inválido**, al reproducir música E.D.A. puede **lanzar ese script solo** y reintentar una vez. Desactivar: `EDA_SPOTIFY_AUTO_LOGIN=0` en `.env`.
-4. Sin configuración, E.D.A. sigue usando el **modo escritorio** (como antes). El control remoto vía API suele requerir **Premium** y un cliente Spotify abierto.
+### 1) Clonar el repositorio
 
-`python health_check.py` muestra `spotify_web` y `optional:spotipy`.
+```bash
+git clone <URL_DEL_REPO>
+cd EDA_Project
+```
 
-## Documentación y ejemplos
+### 2) Ejecutar el lanzador unificado
 
-| Ruta | Contenido |
-|------|------------|
-| `docs/README.md` | Índice de la carpeta `docs/` |
-| `docs/GUIA_NOVATO_CODIGO.md` | Recorrido por módulos |
-| `docs/GUIA_LIBRERIAS_Y_EXTENSIONES.md` | Dependencias y prácticas |
-| `docs/EJEMPLOS_CAPACIDADES_EDA.txt` | Frases de prueba (voz / texto) |
-| `scripts/windows/README.md` | Lanzadores Windows |
+- **Windows:** `INICIAR_ASISTENTE.bat`
+- **Linux/macOS:** `./iniciar.sh`
 
-Wake words habituales: `E.D.A.`, `eda`, `jarvis`.
+El lanzador guía la instalación si falta algo.
 
-## Estructura del repositorio
+### 3) Instalación manual (alternativa)
+
+```bash
+py -3.12 -m venv .venv
+```
+
+- **Windows**
+```bat
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+- **Linux**
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 4) Configurar variables de entorno
+
+```bash
+cp .env.example .env
+```
+
+En Windows puedes copiarlo manualmente en el Explorador.  
+Edita `.env` solo si necesitas integraciones opcionales (por ejemplo Spotify Web API o LLM remoto).
+
+## Configuración de Ollama (opcional, recomendado)
+
+1. Instala Ollama: [https://ollama.com/download](https://ollama.com/download)  
+2. Levanta el servicio y descarga un modelo liviano:
+
+```bash
+ollama pull llama3.2:1b
+```
+
+3. Verifica estado:
+
+```bash
+python health_check.py
+```
+
+Si Ollama no está disponible, el proyecto sigue funcionando, pero con capacidades reducidas según flujo.
+
+## Usage
+
+### Ejecutar el asistente
+
+- GUI legacy (predeterminada):
+```bash
+python run_assistant.py
+```
+
+- Modo CLI (opcional):
+```bash
+python run_assistant.py --cli
+```
+
+### Uso básico
+
+- Escribe o dicta comandos desde la interfaz.
+- Activa/desactiva voz desde el check de respuesta hablada.
+- Usa el botón de micrófono para escucha por frase o continua.
+- Ajusta permisos y configuración desde el panel lateral.
+
+### Ejemplos de uso reales
+
+- `abre chrome`
+- `abre youtube y busca lofi en youtube`
+- `ejecuta comando: dir`
+- `observar sistema: procesos`
+- `mueve archivo: C:\tmp\a.txt -> C:\tmp\b.txt`
+- `reproduce metallica en spotify`
+- `objetivo organizar trabajo y luego ejecutar siguiente paso`
+
+### Cómo usar (Visión y Organización de Archivos)
+
+---
+### Cómo usar — Visión y Organización de Archivos
+
+[INCLUIR EL SNIPPET EXACTO QUE TE PROPORCIONÉ EN LA SECCIÓN 1 de este prompt]
+---
+
+#### Cheat sheet rápido
+
+- `Analiza mi pantalla`
+- `Organiza la carpeta Downloads`
+- `Sí` / `No` para confirmar
+
+## Detección inteligente Web/App
+
+El asistente distingue entre aplicaciones de escritorio y sitios web:
+
+- `abre spotify` -> intenta abrir Spotify como app local.
+- `abre youtube` -> detecta web-app y abre `https://www.youtube.com` en navegador.
+- `abre example.com` -> normaliza a `https://example.com`.
+- `abre localhost:8000` -> abre `http://localhost:8000`.
+
+## Estructura del proyecto
 
 ```text
 EDA_Project/
-├── main.py              # Entrada: GUI o --cli
-├── health_check.py      # Wrapper → eda.health_check
+├── src/eda/                 # Código fuente principal
+├── scripts/                 # Utilidades de build/mantenimiento
+├── tests/                   # Pruebas unitarias
+├── docs/                    # Documentación adicional
+├── config/                  # Configuración versionada no sensible
+├── data/                    # Runtime local (logs, memoria, backups, etc.)
+├── main.py                  # Punto de entrada
+├── health_check.py          # Diagnóstico de entorno
+├── install_deps.py          # Bootstrap de entorno
+├── INICIAR_ASISTENTE.bat    # Arranque unificado en Windows
+├── iniciar.sh               # Arranque unificado en Linux/macOS
 ├── requirements.txt
-├── pyproject.toml
-├── .env.example
-├── eda/                 # Paquete principal (GUI, core, web_solver, memory, …)
-├── docs/
-├── scripts/windows/     # .bat / .cmd / .vbs
-├── tests/
-├── memory/              # *.json runtime en .gitignore; solo *.example.json en Git
-├── logs/ backups/ …     # Generados en ejecución (ignorados)
-└── …
+└── pyproject.toml
 ```
 
-## Configuración útil
+## Dependencias principales
 
-- **Permisos GUI** y familia de acciones: panel **Permisos** en la aplicación; persisten en memoria.
-- **Confirmaciones sensibles:** `ASK_PERMISSION_FOR_SENSITIVE_ACTIONS` en `eda/config.py`.
-- **Ollama:** `OLLAMA_MODEL`, URLs en `eda/config.py`.
+- `requests`, `urllib3`, `beautifulsoup4`
+- `pyttsx3`, `SpeechRecognition`
+- `pyautogui`, `pygetwindow`, `psutil`
+- `duckduckgo-search`, `googlesearch-python`
+- `bleak`, `screen-brightness-control`
+- `ollama` (cliente Python)
+- `obsws-python`, `spotipy` (integraciones opcionales)
 
-## Web solver (resumen)
+Ver lista completa en `requirements.txt`.
 
-Flujo típico: búsqueda (p. ej. DuckDuckGo) → scrape limitado → síntesis con Ollama o LLM remoto (según modo) → caché en `memory/solutions_cache.json`. Uso programático: `from eda.web_solver import WebSolver`.
+## Compatibilidad con 8GB de RAM
 
-## Autoevolución
+- Recomendado usar modelos livianos en Ollama (ej. `llama3.2:1b`).
+- Mantener navegador y apps pesadas cerradas durante sesiones largas.
+- Ejecutar mantenimiento periódico de runtime (`scripts/scan_obsolete.py` y limpieza de logs).
+- Si detectas presión de memoria, usa preferentemente texto en lugar de voz continua.
 
-`EvolutionEngine`: backup antes de escribir, validación `ast.parse()`, sugerencias en `suggestions/`. La autoevolución “en bloque” del menú normaliza finales de línea en `.py` del proyecto; el autoaprendizaje confirmado por el usuario puede añadir funciones a módulos elegidos (p. ej. `eda/skills_auto.py`).
+## Troubleshooting
 
-## Problemas frecuentes
+- **`No module named ...`**  
+  Activa `.venv` e instala dependencias nuevamente con `pip install -r requirements.txt`.
 
-| Síntoma | Qué revisar |
-|---------|----------------|
-| Sin Ollama | `ollama serve`, `ollama list`, firewall local |
-| Micrófono | Permisos Windows; `pyaudio` / `speechrecognition` |
-| Sin Bluetooth | Adaptador encendido; paquete `bleak` |
-| GUI no abre | `python -m tkinter` |
-| pyautogui | Sesión de escritorio activa; permisos de usuario |
+- **Micrófono no detectado / STT falla**  
+  Verifica permisos del SO, dispositivo por defecto y prueba con frases más cortas.
 
-Log principal: `logs/eda.log`.
+- **Sin voz de salida (TTS)**  
+  Revisa configuración de audio del sistema y estado del check de voz en UI.
 
-## Git y colaboración
+- **Ollama offline**  
+  Inicia Ollama, valida con `ollama list` y luego `python health_check.py`.
 
-`.gitignore` excluye `.env`, `venv*/`, `memory/*.json` (no los `.example.json`), logs, backups, etc. **No subir** claves ni `memoria.json` personal.
+- **Errores con dependencias en Linux**  
+  Instala librerías de sistema necesarias para audio/GUI antes de `pip install`.
 
+### Problemas con voz en Windows (PyAudio)
+
+En Python 3.12/Windows puede fallar la compilación de `pyaudio` (`Failed building wheel for pyaudio`).
+El proyecto ahora **no bloquea el arranque**: inicia en modo limitado (sin micrófono/STT continuo) y mantiene GUI + TTS cuando sea posible.
+
+#### Recrear entorno virtual con Python 3.12
+
+```bat
+rmdir /s /q .venv
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Pasos recomendados para recuperar voz completa:
+
+1. Activar entorno virtual:
+```bat
+.venv\Scripts\activate
+```
+2. Instalar helper de ruedas Windows:
+```bat
+pip install pipwin
+```
+3. Instalar PyAudio:
+```bat
+pipwin install pyaudio
+```
+4. Si falla, instalar **Build Tools for Visual Studio** (Desktop development with C++) y reintentar.
+5. Alternativa estable: usar entorno Conda con `conda-forge`.
+
+Logs del instalador:
+- Revisa `logs/installer.log` para ver intentos y fallbacks de instalación (`pipwin`, `--only-binary`, rueda local, compilación).
+
+## Desarrollo y calidad
+
+- Ejecutar tests:
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
-git add -A
-git commit -m "Tu mensaje"
-git push origin main
 ```
+
+La suite actual incluye **72+ tests** unitarios/integración para intents, orquestador, calidad de respuesta, voz y detección Web/App.
+
+- Diagnóstico de entorno:
+```bash
+python health_check.py
+```
+
+- Candidatos de limpieza runtime:
+```bash
+python scripts/scan_obsolete.py
+```
+
+## Contributing
+
+Si quieres colaborar, abre un issue con:
+- contexto del problema,
+- pasos de reproducción,
+- entorno (OS + versión Python),
+- logs relevantes.
+
+Para PRs, prioriza cambios pequeños y testeables.
+
+## Créditos
+
+- Proyecto E.D.A. por Eric Jose Sandi Solir.
+- Librerías open source de la comunidad Python.
 
 ## Licencia
 
-Ver archivo `LICENSE` en la raíz del proyecto.
+Este proyecto se distribuye bajo licencia **MIT**.  
+Consulta el archivo `LICENSE`.
