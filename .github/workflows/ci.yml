@@ -36,5 +36,7 @@ jobs:
         run: python tools/operate_secure.py --dry-run --no-tests
 
       - name: Run unit tests
+        env:
+          EDA_UI_HEADLESS: "1"
         run: python -m unittest discover -s tests -p "test_*.py"
 

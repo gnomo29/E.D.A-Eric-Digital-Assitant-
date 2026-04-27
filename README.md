@@ -128,6 +128,23 @@ python run_assistant.py
 python run_assistant.py --cli
 ```
 
+### Interfaz Obsidian (`src/ui_main.py`)
+
+Interfaz ligera tipo “deep obsidian” orientada a operación segura:
+
+```bash
+python src/ui_main.py
+```
+
+En CI o máquinas sin pantalla puedes usar `python src/ui_main.py --no-gui` (sale al instante) o exportar `EDA_UI_HEADLESS=1` para que el punto de entrada no abra ventana.
+
+- **RAM:** pensada para equipos con **8 GB de RAM** o más; el uso pico depende del SO y del backend (Tk vs CustomTkinter). Un benchmark de referencia en este repo está en `tools/profiles/ui_peak_report.txt` (generado con `python tools/ui_memory_profile.py`).
+- **Métricas (psutil):** el refresco del panel CPU/RAM usa por defecto **2000 ms**. Se puede cambiar con la variable de entorno `EDA_UI_METRICS_MS` o con `--metrics-ms` en la línea de comandos.
+- **CustomTkinter:** si `customtkinter` no está disponible, la UI cae automáticamente a **tkinter** (degradado visual mínimo, sin crashear).
+- **Hilos y seguridad:** el `ActionAgent` corre en **ThreadPoolExecutor**; los comandos de riesgo medio/alto (y aprendizaje no confiable por defecto) abren un **modal** (Approve / Deny / Approve Once y “Record trust”) antes de ejecutar. Las decisiones quedan en `logs/operate_secure_audit.jsonl`.
+- **Pruebas:** `python -m unittest discover -s tests -p "test_*.py"` (incluye `tests/test_ui_main.py`, sin GUI real).
+- **Benchmark RSS:** `python tools/ui_memory_profile.py` (60 s de muestreo por defecto).
+
 ### Uso básico
 
 - Escribe o dicta comandos desde la interfaz.
@@ -201,6 +218,7 @@ Ver lista completa en `requirements.txt`.
 
 ## Compatibilidad con 8GB de RAM
 
+- Para la GUI nueva (`src/ui_main.py`), revisa el último `tools/profiles/ui_peak_report.txt` tras ejecutar `tools/ui_memory_profile.py` en tu equipo.
 - Recomendado usar modelos livianos en Ollama (ej. `llama3.2:1b`).
 - Mantener navegador y apps pesadas cerradas durante sesiones largas.
 - Ejecutar mantenimiento periódico de runtime (`scripts/scan_obsolete.py` y limpieza de logs).
