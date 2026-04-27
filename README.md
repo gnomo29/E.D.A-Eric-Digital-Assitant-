@@ -302,7 +302,143 @@ La suite actual incluye **72+ tests** unitarios/integración para intents, orque
 - **Conector móvil Opt-In:** antes de usar mensajes móviles, E.D.A. pide consentimiento y configuración de token.
   - `enviar mensaje al móvil: ...`
   - `configurar móvil: telegram|TOKEN|CHAT_ID`
+  - **Setup Telegram (BotFather):**
+    1. En Telegram abre [@BotFather](https://t.me/BotFather) y crea bot con `/newbot`.
+    2. Copia el **Bot Token**.
+    3. Escribe al bot al menos un mensaje.
+    4. Obtén tu `chat_id` con `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+    5. Ejecuta `configurar móvil: telegram|<TOKEN>|<CHAT_ID>`.
+- **Deshacer acciones:** comando rápido `Deshazlo` o `Deshaz lo último` para revertir el último movimiento de archivos registrado.
 - **Token cifrado:** credenciales móviles se guardan cifradas localmente con el motor de secretos.
+
+### Telegram Webhook (opcional, alternativa a polling)
+
+1. Activa modo webhook en configuración:
+   - `TELEGRAM_CONTROL_MODE=webhook`
+   - `TELEGRAM_WEBHOOK_SECRET=<secret_largo>`
+2. Levanta E.D.A.; el endpoint local queda en:
+   - `POST /telegram/webhook`
+3. Si estás en desarrollo, expón localhost con:
+```powershell
+tools/run_ngrok_webhook.ps1
+```
+4. Registra la URL pública en Telegram (`setWebhook`) y añade el header secret:
+   - `X-Telegram-Bot-Api-Secret-Token: <secret_largo>`
+5. Para volver a polling:
+   - `TELEGRAM_CONTROL_MODE=polling`
+
+Seguridad webhook:
+- Rechaza requests sin `secret` válido.
+- Filtra por `chat_id` dueño.
+- Solo guarda en cola/auditoría hash del payload (`raw_payload_hash`), no payload en claro.
+
+### ACL, Rate-limit y OTP remoto (Telegram)
+
+- Archivo ACL configurable:
+  - `config/remote_acl.json`
+  - Campos por comando: `pattern`, `level` (`info|safe|critical`), `enabled`.
+- Parámetros en `src/eda/config.py`:
+  - `REMOTE_ACL_FILE`
+  - `REMOTE_RATE_LIMIT_PER_MINUTE` (default `5`)
+  - `REMOTE_OTP_TTL_SECONDS` (default `120`)
+- Flujo de seguridad:
+  - Comandos remotos pasan por ACL antes de ejecutar.
+  - Si excede rate-limit por `chat_id`, se rechaza y audita.
+  - Si ACL marca comando `critical`, E.D.A. envía OTP y exige `confirm <OTP>`.
+  - Tras 3 OTP inválidos en 10 minutos, E.D.A. envía alerta por Telegram.
+- Auditoría JSONL:
+  - `logs/remote_commands.log`
+  - `logs/bootstrap_actions.log`
+
+### Rotación y revocación de firmas (producción)
+
+- Rotación segura de llaves:
+```bash
+python tools/rotate_keys.py
+```
+  Opciones:
+  - `--dry-run`: simula sin escribir archivos.
+  - `--force`: limpia estado temporal previo (`*_new`, `.temp`, `.old`) si corresponde.
+  - `--rollback`: restaura llaves/firmas desde `*.old`.
+
+- Revocar / listar / reinstaurar skills:
+```bash
+python tools/revoke_skill.py revoke example_skill.py --reason "incidente"
+python tools/revoke_skill.py list
+python tools/revoke_skill.py unrevoke example_skill.py
+```
+
+Checklist manual recomendado:
+1. Ejecutar `--dry-run`.
+2. Confirmar backup en `data/backups/keys_rotation_*`.
+3. Rotar llaves y validar carga de plugins.
+4. Revocar skills sospechosas y re-ejecutar tests.
+5. Si falla validación post-rotación, ejecutar `tools/rotate_keys.py --rollback`.
+
+### Operación segura unificada (SRE)
+
+```bash
+python tools/operate_secure.py --dry-run --rotate-keys --smoke-loader --rollback-on-fail --yes
+```
+
+Flujo automatizado:
+1. Backup de `keys/signatures/revocations` en `data/backups/operate_<timestamp>/`.
+2. Rotación de llaves opcional (`--rotate-keys`).
+3. Smoke de loader/firma (`--smoke-loader`).
+4. Revocación opcional (`--revoke <skill.py> --revoke-reason "..."`) solo si smoke OK.
+5. Rollback automático (`--rollback-on-fail`) si hay fallo crítico.
+6. Auditoría JSONL en `logs/operate_secure_audit.jsonl`.
+
+Flags útiles:
+- `--dry-run`
+- `--rotate-keys`
+- `--smoke-loader`
+- `--revoke <skill.py>`
+- `--rollback-on-fail`
+- `--telegram-smoke` (usa token/chat por env o flags; tokens ofuscados en logs)
+- `--timeout 600`
+
+## Operaciones y Mantenimiento v3.0
+
+- **Bootstrap inicial seguro:**
+```bash
+python tools/bootstrap_v3.py
+```
+  Este script:
+  1) respalda `skills/signatures.json`,
+  2) firma skills actuales (sin sobrescribir llaves existentes),
+  3) valida integridad anti-manipulación,
+  4) rota/comprime logs antiguos,
+  5) ejecuta smoke test Telegram opcional con `TELEGRAM_TOKEN` y `TELEGRAM_CHATID`,
+  6) corre la suite completa de tests.
+
+- **Modos rápidos CLI:**
+```bash
+python tools/bootstrap_v3.py --only-sign
+python tools/bootstrap_v3.py --no-tests --telegram-smoke --telegram-token $TOKEN --telegram-chat $CHAT
+python tools/bootstrap_v3.py --dry-run
+```
+
+- **Firmar una skill nueva sin regenerar llaves:**
+```bash
+python tools/update_skills.py mi_skill.py
+```
+  También re-firma `skills/manifest.json` para mantener compatibilidad con `PluginLoader`.
+
+- **Re-firmado completo manual (si agregaste muchas skills):**
+```bash
+python tools/sign_skill.py
+```
+
+- **Variables de entorno Telegram (opcional):**
+  - `TELEGRAM_TOKEN`
+  - `TELEGRAM_CHATID`
+
+- **CI no interactivo:**
+```bash
+python tools/bootstrap_v3.py --yes --dry-run --no-tests
+```
+  En CI, `--yes` habilita modo no interactivo y deja auditoría de acciones ejecutadas/omitidas.
 
 - Diagnóstico de entorno:
 ```bash
