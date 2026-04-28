@@ -43,6 +43,11 @@ INTENT_PATTERNS: Dict[str, str] = {
     "organize_directory": r"\b(organiza|ordena|clasifica|limpia)\s+(?:la\s+carpeta\s+)?(.+)",
     "screen_comprehension": r"\b(que hay en mi pantalla|qué hay en mi pantalla|explicame este error|explícame este error|analiza mi pantalla|analiza esta pantalla)\b",
     "create_presentation": r"\b(hazme una presentación|crea una presentación|crear presentacion|crear presentación)\b\s*(.*)",
+    "list_windows": r"\b(lista(?:r)?|muestra(?:r)?)\s+(?:las\s+)?ventanas\s+(?:abiertas|activas)\b",
+    "focus_window": r"\b(?:enfoca|activar|activa)\s+ventana\s+(.+)",
+    "activate_app_window": r"\b(?:activa|enfoca)\s+(.+)$",
+    "shutdown_system": r"\b(?:apaga|apagar)\s+(?:el\s+)?(?:pc|equipo|sistema|computador|ordenador)\b",
+    "restart_system": r"\b(?:reinicia|reiniciar)\s+(?:el\s+)?(?:pc|equipo|sistema|computador|ordenador)\b",
 }
 
 COMPOUND_CONNECTOR_REGEX = re.compile(r"\s+(?:y\s+luego|luego|después|despues|y)\s+", flags=re.IGNORECASE)
@@ -155,6 +160,14 @@ def parse_command(text: str) -> ParsedCommand:
         query = play_music_match.group(1).strip()
         log.info("[CMD_PARSE] intent=play_music entity='%s' raw='%s'", query, raw)
         return ParsedCommand(intent="play_music", entity=query, raw=raw, confidence=0.92)
+
+    try:
+        from .nlu.spotify_intent import utterance_might_be_spotify
+    except Exception:  # pragma: no cover
+        utterance_might_be_spotify = lambda _t: False
+    if utterance_might_be_spotify(raw):
+        log.info("[CMD_PARSE] intent=play_music (spotify hint) entity='%s' raw='%s'", raw.strip(), raw)
+        return ParsedCommand(intent="play_music", entity=raw.strip(), raw=raw, confidence=0.89)
 
     for intent, pattern in INTENT_PATTERNS.items():
         match = re.search(pattern, text)

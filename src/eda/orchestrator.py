@@ -81,6 +81,8 @@ class CommandOrchestrator:
         self._pending_risky_action: dict[str, str] | None = None
         self._pending_close_app_confirm: dict[str, str] | None = None
         self._pending_pdf_overwrite: dict[str, str] | None = None
+        self._pending_shutdown_confirm = False
+        self._pending_restart_confirm = False
         self._pending_trigger_create: dict[str, Any] | None = None
         self._pending_trigger_execute: dict[str, Any] | None = None
         self._pending_youtube_options: list[dict[str, str]] = []
@@ -488,6 +490,26 @@ class CommandOrchestrator:
                 self._pending_pdf_overwrite = None
                 return OrchestrationResult(True, "Cancelado, no sobrescribí el PDF.", "create_pdf_cancelled")
             return OrchestrationResult(True, "Responde Sí o No para sobrescribir el PDF.", "create_pdf_wait")
+        if self._pending_shutdown_confirm:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                self._pending_shutdown_confirm = False
+                result = self.actions.shutdown(preconfirmed=True)
+                return OrchestrationResult(True, result.get("message", "Apagado programado."), "shutdown_system")
+            if decision is False:
+                self._pending_shutdown_confirm = False
+                return OrchestrationResult(True, "Cancelado, no apagaré el equipo.", "shutdown_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para confirmar apagado del sistema.", "shutdown_wait")
+        if self._pending_restart_confirm:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                self._pending_restart_confirm = False
+                result = self.actions.restart(preconfirmed=True)
+                return OrchestrationResult(True, result.get("message", "Reinicio programado."), "restart_system")
+            if decision is False:
+                self._pending_restart_confirm = False
+                return OrchestrationResult(True, "Cancelado, no reiniciaré el equipo.", "restart_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para confirmar reinicio del sistema.", "restart_wait")
 
         risk_preview = self._build_risk_preview(clean)
         if risk_preview:
@@ -661,6 +683,42 @@ class CommandOrchestrator:
             fallback_url = f"https://www.google.com/search?q={quote_plus(target)}&hl=es"
             self.actions.open_website(fallback_url)
             return OrchestrationResult(True, "No identifiqué la app; abrí búsqueda web como fallback.", "open_app_fallback")
+
+        if intent == "list_windows":
+            windows = self.actions.list_windows()
+            if windows.get("status") != "ok":
+                return OrchestrationResult(True, windows.get("message", "No pude listar ventanas."), "list_windows")
+            items = windows.get("windows", [])
+            if not isinstance(items, list) or not items:
+                return OrchestrationResult(True, "No detecté ventanas abiertas visibles.", "list_windows")
+            preview = "\n".join(f"- {str(w)}" for w in items[:20])
+            return OrchestrationResult(True, f"Ventanas abiertas:\n{preview}", "list_windows")
+
+        if intent == "focus_window":
+            target = parsed.entity or clean
+            focused = self.actions.focus_window(target)
+            return OrchestrationResult(True, focused.get("message", "Intenté enfocar la ventana."), "focus_window")
+
+        if intent == "activate_app_window":
+            target = parsed.entity or clean
+            focused = self.actions.activate_app_window(target)
+            return OrchestrationResult(True, focused.get("message", "Intenté activar la ventana."), "activate_app_window")
+
+        if intent == "shutdown_system":
+            self._pending_shutdown_confirm = True
+            return OrchestrationResult(
+                True,
+                "Vas a apagar el equipo. Esta acción cerrará aplicaciones y puede perderse trabajo no guardado. ¿Confirmas? (Sí/No)",
+                "shutdown_confirm_required",
+            )
+
+        if intent == "restart_system":
+            self._pending_restart_confirm = True
+            return OrchestrationResult(
+                True,
+                "Vas a reiniciar el equipo. Esta acción cerrará aplicaciones y puede perderse trabajo no guardado. ¿Confirmas? (Sí/No)",
+                "restart_confirm_required",
+            )
 
         if intent == "close_app":
             target = parsed.entity or clean
