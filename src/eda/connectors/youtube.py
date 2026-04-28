@@ -107,6 +107,9 @@ def detect_youtube_intent(text: str) -> bool:
         return True
     if "muestrame un video" in low or "muéstrame un video" in low or "abre un video" in low:
         return True
-    if re.search(r"^\s*reproduce\s+[a-z0-9áéíóúñ_. -]{2,}$", low) and "spotify" not in low:
+    if re.search(r"^\s*reproduce\s+.+\s+en\s+youtube\b", low):
+        return True
+    # Heurística: "reproduce <creador123>" suele referirse a YouTube creator/channel.
+    if re.search(r"^\s*reproduce\s+[a-z0-9_.-]+\d+[a-z0-9_.-]*\s*$", low) and "spotify" not in low:
         return True
     return False
