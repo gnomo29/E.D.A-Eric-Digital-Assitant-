@@ -237,6 +237,8 @@ class EDABaseUI:
 
         def worker() -> None:
             user = os.getenv("USERNAME") or os.getenv("USER") or "unknown"
+            profile_before = self.memory.get_user_profile()
+            profile_before_ts = str(profile_before.get("updated_at", ""))
             need = needs_user_approval(text, trusted=self._trusted_hashes)
             if need:
                 req_id = hash_command(text + str(time.time_ns()))
@@ -299,13 +301,25 @@ class EDABaseUI:
                 self.orchestrator.persist(text, answer)
             except Exception:
                 pass
+            profile_after = self.memory.get_user_profile()
+            profile_after_ts = str(profile_after.get("updated_at", ""))
+            memory_updated = bool(profile_after_ts and profile_after_ts != profile_before_ts)
 
             def ui_done() -> None:
                 self.append_assistant_bubble(answer)
                 tag = "OK" if handled else "WARN"
                 self.append_log_line("ACTION", f"{tag}: {(answer or '')[:220]}")
+                source = str(getattr(result, "source", ""))
+                if source.startswith("play_music") or source.startswith("spotify"):
+                    self.append_log_line("SPOTIFY", f"Spotify Skill: {source}")
+                elif source.startswith("play_youtube") or source.startswith("youtube"):
+                    self.append_log_line("YOUTUBE", f"YouTube Skill: {source}")
+                elif source.startswith("list_windows") or source.startswith("focus_window") or source.startswith("activate_app_window"):
+                    self.append_log_line("WINDOWS", f"Window Skill: {source}")
                 if str(getattr(result, "source", "")).startswith("trigger"):
                     self.append_log_line("TRIGGER", f"Trigger ejecutado: {getattr(result, 'source', '')}")
+                if memory_updated:
+                    self.append_log_line("MEMORY", "Memoria actualizada: perfil persistente")
                 self.set_send_enabled(True)
 
             self.run_async(ui_done)
