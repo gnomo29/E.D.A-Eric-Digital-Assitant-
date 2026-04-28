@@ -175,6 +175,23 @@ class IntentRoutingIntegrationTests(unittest.TestCase):
                 self.assertEqual("create_pdf", result.source)
                 self.assertIn(".pdf", result.answer.lower())
 
+    @patch("eda.orchestrator.search_youtube_candidates")
+    @patch("eda.orchestrator.validate_youtube_url", return_value=True)
+    @patch("eda.orchestrator.webbrowser.open")
+    def test_youtube_intent_routes_to_play_youtube(self, _open: MagicMock, _valid: MagicMock, mock_search: MagicMock) -> None:
+        mock_search.return_value = [
+            {
+                "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "video_id": "dQw4w9WgXcQ",
+                "title": "Rick",
+                "channel": "RickAstley",
+                "thumbnail": "https://img.youtube.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+            }
+        ]
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("muestrame un video de gatitos")
+        self.assertEqual("play_youtube", result.source)
+
 
 class UISmokeMockedTests(unittest.TestCase):
     def test_ui_submit_to_orchestrator_mock(self) -> None:

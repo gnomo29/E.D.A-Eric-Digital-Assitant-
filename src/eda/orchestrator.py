@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import json
 import hashlib
+import webbrowser
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import quote_plus
@@ -17,7 +18,14 @@ from . import remote_llm
 from . import web_execution_gate
 from .nlp_utils import detect_confirmation, parse_command
 from .connectors.spotify import route_spotify_natural, try_handle_spotify_pending
+from .connectors.youtube import (
+    detect_youtube_intent,
+    extract_youtube_candidates_from_text,
+    search_youtube_candidates,
+    validate_youtube_url,
+)
 from .spotify_web import try_play_via_web_api
+from .triggers import TriggerStore, normalize_phrase
 from .vision import VisionService
 from .background_tasks import BackgroundReminderWorker
 from .connectors.mobile import TelegramConnector
@@ -73,6 +81,9 @@ class CommandOrchestrator:
         self._pending_risky_action: dict[str, str] | None = None
         self._pending_close_app_confirm: dict[str, str] | None = None
         self._pending_pdf_overwrite: dict[str, str] | None = None
+        self._pending_trigger_create: dict[str, Any] | None = None
+        self._pending_trigger_execute: dict[str, Any] | None = None
+        self._pending_youtube_options: list[dict[str, str]] = []
         self._pending_mobile_opt_in = False
         self.mobile_connector = TelegramConnector()
         self._telegram_offset = 0
@@ -82,6 +93,7 @@ class CommandOrchestrator:
         self._webhook_queue_path = config.DATA_DIR / "queue" / "telegram_queue.jsonl"
         self._webhook_queue_offset = 0
         self.remote_acl = RemoteACL()
+        self.triggers = TriggerStore()
         self.otp_manager = OTPManager(ttl_seconds=int(getattr(config, "REMOTE_OTP_TTL_SECONDS", 120)))
         self._remote_rate_window: dict[str, list[datetime]] = {}
         self._bootstrap_audit_log_path = config.BASE_DIR / "logs" / "bootstrap_actions.log"
@@ -241,6 +253,136 @@ class CommandOrchestrator:
         if not clean:
             return OrchestrationResult(True, "", "empty")
         low = clean.lower()
+
+        if self._pending_youtube_options:
+            choice = low.strip()
+            if choice in {"1", "2", "3"}:
+                idx = int(choice) - 1
+                if 0 <= idx < len(self._pending_youtube_options):
+                    chosen = self._pending_youtube_options[idx]
+                    self._pending_youtube_options = []
+                    webbrowser.open(chosen["url"])
+                    return OrchestrationResult(True, f"Abriendo YouTube: {chosen['url']}", "youtube_choice")
+            if detect_confirmation(clean) is False:
+                self._pending_youtube_options = []
+                return OrchestrationResult(True, "Cancelado, no abrí YouTube.", "youtube_choice_cancel")
+            return OrchestrationResult(True, "Elige 1, 2 o 3 para abrir un resultado de YouTube.", "youtube_choice_wait")
+
+        if self._pending_trigger_create is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                p = dict(self._pending_trigger_create)
+                self._pending_trigger_create = None
+                trigger_id = self.triggers.create_trigger(
+                    phrase=p["phrase"],
+                    match_type=p.get("match_type", "fuzzy"),
+                    action_type=p["action_type"],
+                    action_payload=p.get("action_payload", {}),
+                    require_confirm=bool(p.get("require_confirm", True)),
+                )
+                return OrchestrationResult(True, f"Trigger creado (id={trigger_id}) para '{p['phrase']}'.", "trigger_created")
+            if decision is False:
+                self._pending_trigger_create = None
+                return OrchestrationResult(True, "Cancelado, no creé el trigger.", "trigger_create_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para confirmar creación del trigger.", "trigger_create_wait")
+
+        if self._pending_trigger_execute is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                trig = dict(self._pending_trigger_execute)
+                self._pending_trigger_execute = None
+                result = self._execute_trigger_action(trig)
+                self._audit_operate_secure(
+                    "trigger_executed",
+                    f"trigger_id={trig.get('id')}",
+                    {
+                        "trigger_id": trig.get("id"),
+                        "phrase_matched": trig.get("phrase", ""),
+                        "action": trig.get("action_type"),
+                        "result": result[:180],
+                        "user_confirmed": True,
+                    },
+                )
+                return OrchestrationResult(True, f"Trigger ejecutado — {result}", "trigger_executed_confirmed")
+            if decision is False:
+                self._pending_trigger_execute = None
+                return OrchestrationResult(True, "Trigger cancelado.", "trigger_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para ejecutar el trigger.", "trigger_wait")
+
+        if low.startswith("listar mis disparadores"):
+            rows = self.triggers.list_triggers(active_only=False)
+            if not rows:
+                return OrchestrationResult(True, "No tienes disparadores creados.", "trigger_list")
+            txt = "\n".join([f"#{r['id']} [{'ON' if r['active'] else 'OFF'}] '{r['phrase']}' -> {r['action_type']}" for r in rows[:20]])
+            return OrchestrationResult(True, f"Disparadores:\n{txt}", "trigger_list")
+
+        quick_trigger = self._parse_trigger_chat_request(clean)
+        if quick_trigger is not None:
+            self._pending_trigger_create = quick_trigger
+            return OrchestrationResult(
+                True,
+                (
+                    f"¿Confirmas que cada vez que digas '{quick_trigger['phrase']}' "
+                    f"ejecute {quick_trigger['action_type']}?"
+                ),
+                "trigger_create_confirm",
+            )
+
+        if detect_youtube_intent(clean):
+            yt = self._route_play_youtube(clean)
+            if yt:
+                return OrchestrationResult(True, yt, "play_youtube")
+        identity_facts = self.memory.update_user_profile_from_text(clean)
+        if identity_facts:
+            self.memory.save_long_term_memory(
+                clean,
+                f"Perfil actualizado: {', '.join(f'{k}={v}' for k, v in identity_facts.items())}",
+                tags=["identity", "profile"],
+                importance=5,
+            )
+
+        if low.startswith("recuerda que"):
+            remembered = clean.split("que", 1)[1].strip(" .,:;") if "que" in low else clean
+            self.memory.save_long_term_memory(
+                clean,
+                f"Recordatorio persistente registrado: {remembered}",
+                tags=["remember", "user_fact"],
+                importance=5,
+            )
+            profile = self.memory.get_user_profile()
+            name = str(profile.get("name", "Eric")).strip() or "Eric"
+            return OrchestrationResult(
+                True,
+                f"Entendido, {name}. Guardado en mi memoria permanente.",
+                "remember_persistent",
+            )
+
+        trig_match = self.triggers.match(clean)
+        if trig_match and trig_match.get("rate_limited"):
+            return OrchestrationResult(True, "Rate limit de triggers alcanzado (3/min).", "trigger_rate_limit")
+        if trig_match and trig_match.get("trigger"):
+            t = trig_match["trigger"]
+            if bool(t.get("require_confirm")):
+                self._pending_trigger_execute = t
+                self._audit_operate_secure(
+                    "trigger_match_confirm_required",
+                    f"trigger_id={t.get('id')}",
+                    {"trigger_id": t.get("id"), "phrase_matched": trig_match.get("phrase_matched"), "action": t.get("action_type")},
+                )
+                return OrchestrationResult(True, "Trigger detectado. ¿Confirmas ejecución? (Sí/No)", "trigger_confirm_required")
+            result = self._execute_trigger_action(t)
+            self._audit_operate_secure(
+                "trigger_executed",
+                f"trigger_id={t.get('id')}",
+                {
+                    "trigger_id": t.get("id"),
+                    "phrase_matched": trig_match.get("phrase_matched"),
+                    "action": t.get("action_type"),
+                    "result": result[:180],
+                    "user_confirmed": False,
+                },
+            )
+            return OrchestrationResult(True, f"Trigger: '{t.get('phrase')}' ejecutado — {result}", "trigger_executed")
 
         if web_execution_gate.text_disarms_gate(clean):
             web_execution_gate.disarm()
@@ -971,6 +1113,16 @@ class CommandOrchestrator:
 
     def persist(self, user_text: str, answer: str, record_behavior: bool = True) -> None:
         self.memory.add_history(user_text, answer)
+        importance = 1
+        tags: list[str] = ["interaction"]
+        low = (user_text or "").lower()
+        if any(k in low for k in ("me llamo", "mi nombre", "soy ", "recuerda que")):
+            importance = 5
+            tags.append("identity")
+        elif "?" in low:
+            importance = 2
+            tags.append("question")
+        self.memory.save_long_term_memory(user_text, answer, tags=tags, importance=importance)
         if not record_behavior:
             return
         try:
@@ -978,6 +1130,85 @@ class CommandOrchestrator:
             self.memory.record_behavior_event(parsed.intent, parsed.entity, user_text)
         except Exception:
             pass
+
+    @staticmethod
+    def _parse_trigger_chat_request(text: str) -> dict[str, Any] | None:
+        low = (text or "").strip().lower()
+        m = re.search(
+            r"(?:crear disparador:|cada vez que diga)\s*[\"']?(.+?)[\"']?\s+(?:abre spotify y reproduce|reproduce)\s+(.+)$",
+            low,
+        )
+        if not m:
+            return None
+        phrase = normalize_phrase(m.group(1))
+        target = m.group(2).strip()
+        if not phrase or not target:
+            return None
+        action_type = "play_spotify"
+        payload = {"query": target}
+        if "youtube" in target or "video" in target:
+            action_type = "play_youtube"
+            payload = {"query": target}
+        return {
+            "phrase": phrase,
+            "match_type": "fuzzy",
+            "action_type": action_type,
+            "action_payload": payload,
+            "require_confirm": True,
+        }
+
+    def _execute_trigger_action(self, trigger: dict[str, Any]) -> str:
+        action_type = str(trigger.get("action_type", "")).strip()
+        payload = trigger.get("action_payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if action_type == "play_spotify":
+            q = str(payload.get("query", "")).strip()
+            return self._route_play_music(q or "música")
+        if action_type == "play_youtube":
+            q = str(payload.get("query", "")).strip()
+            return self._route_play_youtube(q or "video") or "No pude abrir YouTube."
+        if action_type == "open_app":
+            app = str(payload.get("app", "")).strip()
+            r = self.actions.open_app(app)
+            return r.get("message", f"Abrí {app}.")
+        if action_type == "URL Viewer":
+            url = str(payload.get("url", "")).strip()
+            parsed = url.lower()
+            if not (parsed.startswith("http://") or parsed.startswith("https://")):
+                return "URL inválida."
+            self.actions.open_website(url)
+            return f"Abrí {url}"
+        if action_type == "run_script":
+            if not config.TRIGGERS_ALLOW_RUN_SCRIPTS:
+                return "run_script deshabilitado por configuración."
+            script = Path(str(payload.get("script", "")).strip())
+            approved = (config.BASE_DIR / "scripts" / "approved").resolve()
+            try:
+                if approved not in script.resolve().parents:
+                    return "Script fuera de directorio aprobado."
+            except Exception:
+                return "Ruta de script inválida."
+            result = self.actions.run_shell_command(f'python "{script}"')
+            return result.get("message", "Script ejecutado.")
+        return "Acción de trigger no soportada."
+
+    def _route_play_youtube(self, utterance: str) -> str:
+        urls = extract_youtube_candidates_from_text(utterance)
+        if urls and validate_youtube_url(urls[0]["url"]):
+            webbrowser.open(urls[0]["url"])
+            return f"Abriendo YouTube: {urls[0]['url']}"
+        query = re.sub(r"^(reproduce|muestrame un video de|muéstrame un video de|abre un video de)\s+", "", utterance, flags=re.I).strip()
+        cands = search_youtube_candidates(query or utterance)
+        cands = [c for c in cands if validate_youtube_url(c.get("url", ""))]
+        if not cands:
+            return ""
+        if len(cands) == 1:
+            webbrowser.open(cands[0]["url"])
+            return f"Abriendo YouTube: {cands[0]['url']}"
+        self._pending_youtube_options = cands[:3]
+        lines = [f"{i+1}) {c.get('title','video')} - {c.get('url','')}" for i, c in enumerate(self._pending_youtube_options)]
+        return "Encontré estos videos:\n" + "\n".join(lines) + "\nElige 1/2/3."
 
     def _handle_volume(self, text: str) -> str:
         low = (text or "").lower()

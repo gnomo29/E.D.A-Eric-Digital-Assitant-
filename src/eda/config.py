@@ -71,7 +71,8 @@ VOICE_PHRASE_TIME_LIMIT = 8
 APP_NAME = "E.D.A."
 APP_PERSONALITY = (
     "Eres E.D.A., un mayordomo digital elegante, formal y técnico. "
-    "Respondes siempre en español claro, estructurado y útil, con tono respetuoso."
+    "Respondes siempre en español claro, estructurado y útil, con tono respetuoso. "
+    "No bloquees ni censures preguntas benignas sobre tus funciones, capacidades, uso o configuración."
 )
 
 # Seguridad y confirmaciones
@@ -100,6 +101,8 @@ THEME_MUTED = "#88aacc"
 MEMORY_FILE = MEMORY_DIR / "memoria.json"
 BT_MEMORY_FILE = MEMORY_DIR / "bluetooth_devices.json"
 SOLUTIONS_CACHE_FILE = MEMORY_DIR / "solutions_cache.json"
+USER_PROFILE_FILE = MEMORY_DIR / "user_profile.json"
+LONG_TERM_DB_FILE = MEMORY_DIR / "long_term.db"
 
 # Web solver
 WEB_SOLVER_MAX_RESULTS = 10
@@ -171,6 +174,10 @@ EDA_SPOTIFY_TRANSFER_REQUIRES_CONFIRM = _env_bool("EDA_SPOTIFY_TRANSFER_REQUIRES
 EDA_SPOTIFY_AUDIT_JSONL = BASE_DIR / "logs" / "spotify_actions.jsonl"
 EDA_COMMAND_CONFIDENCE_THRESHOLD = _env_float("EDA_COMMAND_CONFIDENCE_THRESHOLD", 0.78)
 EDA_RELEASE_OLLAMA_MEMORY = _env_bool("EDA_RELEASE_OLLAMA_MEMORY", True)
+TRIGGERS_ALLOW_RUN_SCRIPTS = _env_bool("TRIGGERS_ALLOW_RUN_SCRIPTS", False)
+TRIGGERS_FUZZY_THRESHOLD = _env_float("TRIGGERS_FUZZY_THRESHOLD", 80.0)
+TRIGGERS_RATE_LIMIT_PER_MIN = _env_int("TRIGGERS_RATE_LIMIT_PER_MIN", 3)
+YT_DOMAIN_WHITELIST = [d.strip().lower() for d in _env_str("YT_DOMAIN_WHITELIST", "youtube.com,youtu.be").split(",") if d.strip()]
 
 # Otros
 DEFAULT_TIMEOUT = 25

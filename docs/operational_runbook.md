@@ -48,3 +48,16 @@ python tools/intent_test_run.py
 
 - `logs/eda.log` (o logger configurado): líneas `route chosen: ... (score=...)`
 - `logs/operate_secure_audit.jsonl`: fallos operativos como `audio_device_failure`
+
+## 6) Triggers y YouTube
+
+- Verificar triggers en DB:
+  - `python tools/trigger_check.py`
+- Listar desde chat:
+  - `listar mis disparadores`
+- Desactivar temporalmente la ejecución de scripts por trigger:
+  - `TRIGGERS_ALLOW_RUN_SCRIPTS=0`
+- Dominios permitidos para YouTube:
+  - `YT_DOMAIN_WHITELIST=youtube.com,youtu.be`
+- Rate-limit de triggers:
+  - `TRIGGERS_RATE_LIMIT_PER_MIN=3`

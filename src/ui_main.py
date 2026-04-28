@@ -282,11 +282,17 @@ class EDABaseUI:
             answer = (result.answer or "").strip()
             if not answer:
                 answer = "No reconozco ese comando, intenta decir 'abre [app]' o 'reproduce [música]'."
+            try:
+                self.orchestrator.persist(text, answer)
+            except Exception:
+                pass
 
             def ui_done() -> None:
                 self.append_assistant_bubble(answer)
                 tag = "OK" if handled else "WARN"
                 self.append_log_line("ACTION", f"{tag}: {(answer or '')[:220]}")
+                if str(getattr(result, "source", "")).startswith("trigger"):
+                    self.append_log_line("TRIGGER", f"Trigger ejecutado: {getattr(result, 'source', '')}")
                 self.set_send_enabled(True)
 
             self.run_async(ui_done)
@@ -527,6 +533,8 @@ def _make_eda_ctk_ui_class():
                 f"ejecuta comando: python \"{ROOT / 'tools' / 'rotate_keys.py'}\" --dry-run",
                 highlight=True,
             )
+            self._quick_btn(quick_grid, 2, 0, "Listar Triggers", "listar mis disparadores")
+            self._quick_btn(quick_grid, 2, 1, "Crear Trigger", "crear disparador: ironman reproduce acdc")
     
             ctk.CTkLabel(
                 right,
@@ -778,6 +786,8 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
             f"ejecuta comando: python \"{ROOT / 'tools' / 'rotate_keys.py'}\" --dry-run",
             highlight=True,
         )
+        self._tk_quick(qf, 2, 0, "Listar Triggers", "listar mis disparadores")
+        self._tk_quick(qf, 2, 1, "Crear Trigger", "crear disparador: ironman reproduce acdc")
 
         tk.Label(right, text="ÚLTIMOS LOGS", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
         self.log_box = tk.Text(right, height=10, bg="#080808", fg=MUTED, font=("Consolas", 10), state="disabled")

@@ -168,6 +168,8 @@ def run_tests(*, quiet: bool = False) -> tuple[_ResultCollector, float, str]:
     suite.addTests(loader.discover(str(tests_dir), pattern="test_orchestrator_routing_matrix.py"))
     suite.addTests(loader.discover(str(tests_dir), pattern="test_spotify_integration.py"))
     suite.addTests(loader.discover(str(tests_dir), pattern="test_spotify_web.py"))
+    suite.addTests(loader.discover(str(tests_dir), pattern="test_triggers.py"))
+    suite.addTests(loader.discover(str(tests_dir), pattern="test_youtube_handling.py"))
     capture = io.StringIO()
     runner = _CollectorRunner(verbosity=0 if quiet else 2, stream=capture)
     t0 = time.time()
