@@ -1,11 +1,24 @@
-# Documentación E.D.A.
+# Documentacion E.D.A. (ordenada para empezar desde cero)
 
-- `GUIA_NOVATO_CODIGO.md` — qué hace cada módulo y por dónde empezar.
-- `GUIA_LIBRERIAS_Y_EXTENSIONES.md` — dependencias y buenas prácticas.
-- `EJEMPLOS_CAPACIDADES_EDA.txt` — frases de ejemplo para probar la GUI y la voz.
+## Ruta recomendada para alguien nuevo
 
-Los lanzadores para Windows están en `../scripts/windows/`.
+1. `00_EMPIEZA_AQUI.md` (arranque sin conocimientos tecnicos)
+2. `01_MAPA_DEL_PROYECTO.md` (entender como se divide el sistema)
+3. `GUIA_NOVATO_CODIGO.md` (que archivo tocar segun objetivo)
+4. `02_PRIMERA_CONTRIBUCION.md` (hacer un cambio seguro con pruebas)
 
-El código de la aplicación está en el paquete Python **`../eda/`** (importar como `from eda.gui import EDAGUI`, etc.).
+## Referencias tecnicas
 
-Variables de entorno opcionales (p. ej. LLM remoto): ver **`../.env.example`** en la raíz del repo.
+- `GUIA_LIBRERIAS_Y_EXTENSIONES.md` — dependencias y buenas practicas.
+- `operational_runbook.md` — smoke checks y comandos operativos.
+- `CHANGELOG.md` — cambios técnicos del stack/app.
+- `CHANGELOG_PROJECT.md` — changelog general del repositorio.
+- `CONTRIBUTING_PROJECT.md` — guía de contribución.
+- `spotify_integration.md` — detalles de integracion Spotify.
+- `triggers.md` — flujo de triggers/automatizaciones.
+
+## Notas clave del proyecto
+
+- Lanzador recomendado: `../INICIAR_ASISTENTE.bat`
+- Codigo canónico: `../src/eda/`
+- Variables opcionales: `../.env.example`

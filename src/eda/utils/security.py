@@ -19,11 +19,12 @@ except Exception:
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives.asymmetric import rsa, padding
 except Exception:
     hashes = None  # type: ignore[assignment]
     serialization = None  # type: ignore[assignment]
-    ed25519 = None  # type: ignore[assignment]
+    rsa = None  # type: ignore[assignment]
+    padding = None  # type: ignore[assignment]
 
 SHELL_META_PATTERN = re.compile(r"[;&|`$<>]")
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}")
@@ -144,12 +145,12 @@ def sanitize_app_target(target: str) -> ValidationResult:
 def generate_skill_keypair(private_key_path: Path, public_key_path: Path) -> None:
     private_key_path.parent.mkdir(parents=True, exist_ok=True)
     public_key_path.parent.mkdir(parents=True, exist_ok=True)
-    if ed25519 is None or serialization is None:
+    if rsa is None or serialization is None:
         seed = base64.urlsafe_b64encode(_derive_local_key("eda_skill_signing"))
         private_key_path.write_text(seed.decode("utf-8"), encoding="utf-8")
         public_key_path.write_text(seed.decode("utf-8"), encoding="utf-8")
         return
-    private_key = ed25519.Ed25519PrivateKey.generate()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
@@ -165,12 +166,16 @@ def generate_skill_keypair(private_key_path: Path, public_key_path: Path) -> Non
 
 def sign_file(path: Path, private_key_path: Path) -> str:
     content = path.read_bytes()
-    if ed25519 is None or serialization is None:
+    if rsa is None or serialization is None or padding is None or hashes is None:
         key = private_key_path.read_text(encoding="utf-8").encode("utf-8")
         digest = hashlib.sha256(key + content).digest()
         return base64.urlsafe_b64encode(digest).decode("utf-8")
     private_key = serialization.load_pem_private_key(private_key_path.read_bytes(), password=None)
-    signature = private_key.sign(content)
+    signature = private_key.sign(
+        content,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
     return base64.urlsafe_b64encode(signature).decode("utf-8")
 
 
@@ -180,13 +185,18 @@ def verify_file_signature(path: Path, signature_b64: str, public_key_path: Path)
         signature = base64.urlsafe_b64decode(signature_b64.encode("utf-8"))
     except Exception:
         return False
-    if ed25519 is None or serialization is None:
+    if rsa is None or serialization is None or padding is None or hashes is None:
         key = public_key_path.read_text(encoding="utf-8").encode("utf-8")
         digest = hashlib.sha256(key + content).digest()
         return compare_digest(digest, signature)
     try:
         public_key = serialization.load_pem_public_key(public_key_path.read_bytes())
-        public_key.verify(signature, content)
+        public_key.verify(
+            signature,
+            content,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        )
         return True
     except Exception:
         return False

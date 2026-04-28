@@ -12,16 +12,18 @@ venv312/
 .cache/
 
 # Runtime generated data
-logs/
-exports/
-captures/
-backups/
-solutions/
-suggestions/
+data/logs/
+data/exports/
+data/captures/
+data/backups/
+data/solutions/
+data/suggestions/
+temp/runtime/
+temp/cache/
 
 # Local memory/state (runtime)
-memory/*.json
-!memory/*.example.json
+data/memory/*.json
+!data/memory/*.example.json
 
 # OS/editor noise
 .DS_Store
@@ -33,7 +35,35 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets*.json
+credentials*.json
+token*.json
+
+# Llaves locales del proyecto (generadas en runtime)
+config/keys/
+!config/keys/.gitkeep
 
 # Config local de herramientas (no forma parte del producto)
 .continue/
+.cursor/
+.abacus.donotdelete
+
+# Datastores runtime (no versionar estados locales)
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+data/memory/*.sqlite3
+data/logs/*.jsonl
+logs/*.log
+backups/
+tmp_scene.py
+data/temp/
 

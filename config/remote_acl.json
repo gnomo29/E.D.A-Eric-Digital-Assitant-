@@ -1,0 +1,55 @@
+{
+  "default_level": "info",
+  "commands": [
+    {
+      "pattern": "estado",
+      "level": "info",
+      "enabled": true
+    },
+    {
+      "pattern": "listar recordatorios",
+      "level": "info",
+      "enabled": true
+    },
+    {
+      "pattern": "cancelar recordatorio",
+      "level": "safe",
+      "enabled": true
+    },
+    {
+      "pattern": "reproduce",
+      "level": "safe",
+      "enabled": true
+    },
+    {
+      "pattern": "abre",
+      "level": "safe",
+      "enabled": true
+    },
+    {
+      "pattern": "mueve archivo",
+      "level": "critical",
+      "enabled": true
+    },
+    {
+      "pattern": "organiza",
+      "level": "critical",
+      "enabled": true
+    },
+    {
+      "pattern": "borra",
+      "level": "critical",
+      "enabled": true
+    },
+    {
+      "pattern": "elimina",
+      "level": "critical",
+      "enabled": true
+    },
+    {
+      "pattern": "ejecuta comando",
+      "level": "critical",
+      "enabled": true
+    }
+  ]
+}

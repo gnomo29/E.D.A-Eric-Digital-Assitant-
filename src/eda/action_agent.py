@@ -16,6 +16,7 @@ from urllib.parse import quote_plus
 
 from .actions import ActionController
 from . import config
+from . import web_execution_gate
 from .logger import get_logger
 from .mouse_keyboard import MouseKeyboardController
 from .system_observer import SystemObserver
@@ -74,6 +75,27 @@ class ActionAgent:
         clean = (text or "").strip()
         if not clean:
             return False, ""
+        low = clean.lower()
+
+        # No secuestrar conversación natural ni peticiones de música: lo resuelve el orquestador.
+        if clean.endswith("?") or any(k in low for k in ("qué es", "que es", "explícame", "explicame", "por qué", "por que")):
+            return False, ""
+        if any(low.startswith(s) for s in ("reproduce ", "pon ", "ponme ", "escucha ", "play ")):
+            return False, ""
+
+        if web_execution_gate.text_disarms_gate(clean):
+            web_execution_gate.disarm()
+            return True, "Listo, se desbloquearon las acciones locales (comandos, mover archivos, teclear, etc.)."
+
+        if web_execution_gate.is_armed():
+            if self.LEARN_REGEX.match(clean) or self.RUN_COMMAND_REGEX.match(clean) or self.MOVE_FILE_REGEX.match(
+                clean
+            ) or self.TYPE_REGEX.match(clean):
+                return True, (
+                    "Por seguridad no ejecuto comandos de sistema ni rutas sensibles justo después de una síntesis "
+                    "basada en internet. Decí «liberar acciones locales» cuando quieras permitirlo, "
+                    "o usa la aprobación explícita en la interfaz Obsidian."
+                )
 
         # 1) Reutilizar habilidades exactas aprendidas.
         task = self.tasks.get_task_by_trigger(clean)
@@ -110,6 +132,16 @@ class ActionAgent:
         planned_steps = self._decompose_task(clean)
         if not planned_steps:
             return False, ""
+
+        if web_execution_gate.is_armed():
+            risky_tools = frozenset({"command", "move_file", "type"})
+            for step in planned_steps:
+                if str(step.get("tool") or "") in risky_tools:
+                    return True, (
+                        "Hay pasos que mueven archivos o ejecutan comandos; bloqueados tras investigación web "
+                        "hasta que escribas «liberar acciones locales»."
+                    )
+
         answer, success, error = self._execute_dynamic_steps(clean, planned_steps)
         self._persist_learned_execution(clean, planned_steps, answer, success, error)
         return True, answer

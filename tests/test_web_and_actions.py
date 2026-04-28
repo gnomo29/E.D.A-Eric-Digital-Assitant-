@@ -44,6 +44,13 @@ class WebAndActionsTests(unittest.TestCase):
         self.assertEqual(result.get("status"), "ok")
         mock_open.assert_called_once()
 
+    def test_execute_navigation_command_blocks_display_tampering(self) -> None:
+        ac = ActionController()
+        result = ac.execute_navigation_command("busca xrandr --output HDMI-1 --mode 800x600 en youtube")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("status"), "error")
+        self.assertIn("Bloqueado por seguridad", str(result.get("message", "")))
+
     def test_parse_volume_brightness_commands(self) -> None:
         parsed_volume = parse_command("sube el volumen")
         parsed_brightness = parse_command("baja el brillo")

@@ -1,0 +1,8 @@
+# Dependencias opcionales de voz (Windows).
+# No deben bloquear el arranque del asistente.
+pipwin; platform_system == "Windows"
+pyaudio>=0.2.14; platform_system == "Windows"
+pocketsphinx>=5.0.3
+webrtcvad>=2.0.10
+sounddevice>=0.4.6
+

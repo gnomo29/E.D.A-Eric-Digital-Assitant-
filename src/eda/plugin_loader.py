@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from . import config
 from .utils import safe_json_load
 from .utils.security import load_signatures, verify_file_signature
+from .utils.revocation import is_revoked
 
 
 class PluginLoader:
@@ -34,6 +35,8 @@ class PluginLoader:
                 continue
             plugin_path = self.plugins_dir / file_name
             if not plugin_path.exists():
+                continue
+            if is_revoked(file_name):
                 continue
             if not self._is_signed(plugin_path):
                 continue

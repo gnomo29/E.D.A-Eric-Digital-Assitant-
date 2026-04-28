@@ -40,7 +40,7 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
 
 ### `pyttsx3`
 - **Para que sirve:** texto a voz offline.
-- **Donde se usa en E.D.A.:** `voice.py`.
+- **Donde se usa en E.D.A.:** `src/eda/tts.py`.
 - **Implementacion recomendada:**
   - Inicializa motor una sola vez.
   - Selecciona voz en espanol si existe.
@@ -49,7 +49,7 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
 
 ### `SpeechRecognition`
 - **Para que sirve:** voz a texto usando microfono y motores STT.
-- **Donde se usa en E.D.A.:** `voice.py`.
+- **Donde se usa en E.D.A.:** `src/eda/stt.py`.
 - **Implementacion recomendada:**
   - Calibra ruido ambiente.
   - Usa timeouts claros de escucha.
@@ -120,7 +120,7 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
 
 ### `pyperclip`
 - **Para que sirve:** leer/escribir portapapeles.
-- **Donde se usa en E.D.A.:** `clipboard.py`.
+- **Donde se usa en E.D.A.:** utilidades de acciones en `src/eda/actions.py`.
 - **Implementacion recomendada:**
   - Validar contenido vacio.
   - Sanitizar texto antes de uso automatico.
@@ -176,7 +176,7 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
 
 ## 3) Librerias de la libreria estandar (tambien importantes)
 
-- `tkinter`: GUI principal (`gui.py`).
+- `tkinter`: GUI principal (`src/ui_main.py`) y fallback visual.
 - `threading`: tareas en paralelo sin bloquear UI.
 - `asyncio`: operaciones Bluetooth.
 - `subprocess`: comandos del sistema.
@@ -210,14 +210,14 @@ Esta guia explica las librerias que usa E.D.A., como implementarlas mejor y que 
 2. Crear modulo dedicado (ejemplo: `mi_modulo.py`).
 3. Encapsular uso con una clase simple.
 4. Manejar errores internos y devolver dict estandar (`status`, `message`, `data`).
-5. Conectar el modulo desde `gui.py` o `actions.py`.
+5. Conectar el modulo desde `src/ui_main.py` o `src/eda/actions.py`.
 6. Documentar en `README.md` y en esta guia.
 
 ## 6) Prioridad recomendada para mejorar el proyecto
 
 - Primero: `requests`, `voice`, `memory`, `actions`.
 - Despues: `web_solver`/scraping.
-- Al final: autoevolucion (`evolution.py`) y automatizaciones avanzadas.
+- Al final: automatizaciones avanzadas y mejoras incrementales de flujos existentes.
 
 ---
 
