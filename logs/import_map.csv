@@ -1,0 +1,7 @@
+old_route,new_route
+eda.actions,src.eda.actions
+eda.core,src.eda.core
+eda.memory,src.eda.memory
+eda.orchestrator,src.eda.orchestrator
+eda.connectors.spotify,src.eda.connectors.spotify
+old_launchers/*,legacy/old_launchers/*

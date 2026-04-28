@@ -345,7 +345,14 @@ class EDACore:
                 "Instrucción directa: responde en español, en máximo 5 líneas, "
                 "sin inventar datos y priorizando pasos ejecutables."
             ),
+            "Política: no rechaces preguntas benignas sobre capacidades del asistente.",
         ]
+        profile_ctx = ""
+        get_profile_summary = getattr(self.memory, "get_profile_summary_for_prompt", None)
+        if callable(get_profile_summary):
+            profile_ctx = str(get_profile_summary() or "")
+        if profile_ctx:
+            lines.append(f"Perfil persistente del usuario: {profile_ctx}")
         if response_instruction.strip():
             lines.append(f"Instrucción de estilo: {response_instruction.strip()}")
         if extra_context.strip():
@@ -388,6 +395,16 @@ class EDACore:
             vm = psutil.virtual_memory()
             available_mb = vm.available / (1024 * 1024)
             return vm.percent >= 88 or available_mb < 700
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_critical_memory_condition() -> bool:
+        """Condición crítica: limpiar solo historial de sesión en RAM/disco liviano."""
+        try:
+            import psutil
+
+            return psutil.virtual_memory().percent >= 90
         except Exception:
             return False
 
@@ -511,18 +528,40 @@ class EDACore:
     ) -> str:
         """Consulta al modelo local y retorna texto."""
         started_at = time.perf_counter()
+        if self._is_critical_memory_condition():
+            try:
+                self.memory.clear_session_history()
+                gc.collect()
+                self._maybe_release_ollama_memory(force=True)
+                log.warning("[CORE] RAM >= 90%%: historial de sesión limpiado (memoria persistente intacta).")
+            except Exception as exc:
+                log.debug("[CORE] No pude limpiar historial de sesión: %s", exc)
         online = has_internet_connectivity()
         if not online:
             allow_web_fallback = False
 
         def _finish(answer: str, source: str) -> str:
-            elapsed_ms = (time.perf_counter() - started_at) * 1000
-            log.info("[CORE] ask source=%s elapsed_ms=%.1f", source, elapsed_ms)
+            try:
+                elapsed_ms = float((time.perf_counter() - started_at) * 1000)
+            except Exception:
+                elapsed_ms = 0.0
+            log.info(f"[CORE] ask source={source} elapsed_ms={float(elapsed_ms):.1f}")
             return answer
 
         handled_search, search_answer = self.try_open_google_search(message)
         if handled_search:
             return _finish(search_answer, "search_command")
+
+        remember_hit = self.memory.remember_identity_answer(message)
+        if remember_hit:
+            return _finish(remember_hit, "profile_memory")
+
+        memory_hits = self.memory.search_long_term_memory(message, limit=2)
+        if memory_hits and len(message.strip()) <= 80:
+            top = memory_hits[0]
+            recalled = str(top.get("assistant_text", "")).strip()
+            if recalled:
+                return _finish(f"Según mi memoria persistente: {recalled}", "long_term_memory")
 
         prompt = self.build_prompt(message, history, extra_context=extra_context, response_instruction=response_instruction)
 
@@ -533,7 +572,14 @@ class EDACore:
                     return _finish(web_answer, "web_fallback_low_memory")
             return _finish(self._fallback_answer(message), "degraded_low_memory")
 
-        if not self.is_ollama_alive():
+        alive = self.is_ollama_alive()
+        if not alive:
+            for _ in range(3):
+                time.sleep(0.8)
+                if self.is_ollama_alive():
+                    alive = True
+                    break
+        if not alive:
             if remote_llm.use_remote_for_ask_fallback() and remote_llm.is_remote_fully_configured():
                 remote_answer = remote_llm.try_completion_single_prompt(prompt, purpose="ask_no_ollama")
                 if remote_answer:
@@ -560,13 +606,24 @@ class EDACore:
         }
 
         try:
-            response = self.http.post(
-                self.endpoint,
-                json=payload,
-                timeout=getattr(config, "OLLAMA_REQUEST_TIMEOUT_SECONDS", config.DEFAULT_TIMEOUT),
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = {}
+            last_exc: Exception | None = None
+            for _ in range(3):
+                try:
+                    response = self.http.post(
+                        self.endpoint,
+                        json=payload,
+                        timeout=getattr(config, "OLLAMA_REQUEST_TIMEOUT_SECONDS", config.DEFAULT_TIMEOUT),
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    time.sleep(0.7)
+            if last_exc is not None:
+                raise last_exc
             content = str(data.get("response", "")).strip()
 
             if not content and remote_llm.use_remote_for_ask_fallback() and remote_llm.is_remote_fully_configured():

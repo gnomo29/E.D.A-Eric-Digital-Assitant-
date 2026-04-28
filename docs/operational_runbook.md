@@ -61,3 +61,12 @@ python tools/intent_test_run.py
   - `YT_DOMAIN_WHITELIST=youtube.com,youtu.be`
 - Rate-limit de triggers:
   - `TRIGGERS_RATE_LIMIT_PER_MIN=3`
+
+## 7) Cleanup seguro / rollback
+
+- Auditoría de limpieza:
+  - `python tools/cleanup_audit.py`
+- Backup generado por cleanup:
+  - `backups/cleanup_backup_*.tar.gz`
+- Rollback de emergencia:
+  - `bash tools/rollback_cleanup.sh backups/cleanup_backup_TIMESTAMP.tar.gz <commit_before_cleanup>`

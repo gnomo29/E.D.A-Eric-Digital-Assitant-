@@ -1,0 +1,38 @@
+{
+  "duplicate_groups": [],
+  "unused_python_candidates": [
+    "health_check.py",
+    "install_deps.py",
+    "main.py",
+    "scripts\\build_executable.py",
+    "scripts\\scan_obsolete.py",
+    "scripts\\spotify_login.py",
+    "sitecustomize.py",
+    "skills\\example_skill.py",
+    "src\\eda\\audit_log.py",
+    "src\\eda\\bluetooth_manager.py",
+    "src\\eda\\clipboard.py",
+    "src\\eda\\config.py",
+    "src\\eda\\evolution.py",
+    "src\\eda\\file_manager.py",
+    "src\\eda\\i18n.py",
+    "src\\eda\\integration_hub.py",
+    "src\\eda\\model_manager.py",
+    "src\\eda\\multimodal.py",
+    "src\\eda\\obs_controller.py",
+    "src\\eda\\optimizer.py",
+    "src\\eda\\remote_llm.py",
+    "src\\eda\\skills_auto.py",
+    "src\\eda\\tts.py",
+    "src\\eda\\voice.py",
+    "src\\eda\\web_execution_gate.py",
+    "src\\scripts\\generated\\auto_abre_steam.py",
+    "tmp_scene.py"
+  ],
+  "canonical_modules": {
+    "spotify": "src/eda/connectors/spotify.py",
+    "youtube": "src/eda/connectors/youtube.py",
+    "orchestrator": "src/eda/orchestrator.py",
+    "ui": "src/ui_main.py"
+  }
+}

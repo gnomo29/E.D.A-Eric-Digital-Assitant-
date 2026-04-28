@@ -277,9 +277,22 @@ class EDABaseUI:
                     save_trusted_hash(hash_command(text))
                     self._trusted_hashes.add(hash_command(text))
 
-            result = self.orchestrator.orchestrate(text)
-            handled = bool(result.handled)
-            answer = (result.answer or "").strip()
+            handled = False
+            answer = ""
+            try:
+                action_handled, action_answer = self.action_agent.try_handle(text)
+                handled = bool(action_handled)
+                answer = str(action_answer or "").strip()
+            except Exception:
+                handled = False
+                answer = ""
+
+            if not handled:
+                result = self.orchestrator.orchestrate(text)
+                handled = bool(result.handled)
+                answer = (result.answer or "").strip()
+            else:
+                result = type("UIResult", (), {"handled": handled, "answer": answer, "source": "action_agent"})()
             if not answer:
                 answer = "No reconozco ese comando, intenta decir 'abre [app]' o 'reproduce [música]'."
             try:

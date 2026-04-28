@@ -593,7 +593,7 @@ class CommandOrchestrator:
             use_web = self._should_use_web_for_question(clean, intent)
             mem = self.memory.get_memory()
             history = mem.get("chat_history", []) or mem.get("history", [])
-            if use_web and remote_llm.remote_search_mode_requested():
+            if use_web and intent == "search_request" and remote_llm.remote_search_mode_requested():
                 if not remote_llm.is_remote_fully_configured():
                     return OrchestrationResult(True, remote_llm.RemoteUnavailableMsg, "remote_search_misconfigured")
                 answer = self.core.filtered_remote_research_answer(clean)

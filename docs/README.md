@@ -9,6 +9,7 @@
 
 Los lanzadores unificados están en la raíz: `../INICIAR_ASISTENTE.bat` y `../iniciar.sh`.
 
-El código de la aplicación está en el paquete Python **`../eda/`** (importar como `from eda.gui import EDAGUI`, etc.).
+El código canónico de la aplicación está en **`../src/eda/`**.
+Compatibilidad: el paquete `eda` en raíz funciona como shim para imports históricos.
 
 Variables de entorno opcionales (p. ej. LLM remoto): ver **`../.env.example`** en la raíz del repo.
