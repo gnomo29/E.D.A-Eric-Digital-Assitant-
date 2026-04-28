@@ -16,6 +16,14 @@ $env:PYTHONPATH="src"
 python -m unittest tests.test_orchestrator_routing_matrix tests.test_spotify_integration tests.test_spotify_web -v
 ```
 
+```powershell
+$env:PYTHONPATH="src"
+python -m unittest tests.test_intent_routing -v
+python tools/intent_test_run.py
+```
+
+`tools/intent_test_run.py` genera `logs/intent_test_report.json` con precisión/recall, matriz de confusión, top-3 candidatos y pico de RSS.
+
 ## 3) Pruebas manuales de ruteo en UI
 
 1. Abrir UI (`INICIAR_ASISTENTE.bat` o `python src/ui_main.py`).

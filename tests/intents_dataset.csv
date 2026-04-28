@@ -1,0 +1,101 @@
+utterance,expected_intent,expected_entity
+"abre videos de minecraft",open_media_search,minecraft
+"abre videos de recetas rapidas",open_media_search,recetas rapidas
+"abre videos de python",open_media_search,python
+"abre videos de rock clasico",open_media_search,rock clasico
+"abre videos de productividad",open_media_search,productividad
+"abre videos de IA",open_media_search,IA
+"abre videos de noticias tech",open_media_search,noticias tech
+"abre videos de lo-fi",open_media_search,lo-fi
+"abre videos de cocina japonesa",open_media_search,cocina japonesa
+"abre videos de entrevistas",open_media_search,entrevistas
+"busca videos de gatitos",web_search_videos,gatitos
+"busca videos de perritos",web_search_videos,perritos
+"busca videos de deep house",web_search_videos,deep house
+"busca videos de meditation music",web_search_videos,meditation music
+"busca videos de bugs python",web_search_videos,bugs python
+"busca videos de algebra lineal",web_search_videos,algebra lineal
+"busca videos de game dev",web_search_videos,game dev
+"search cat videos",web_search_videos,cat videos
+"search videos about neural networks",web_search_videos,neural networks
+"search videos about blender tutorial",web_search_videos,blender tutorial
+"busca noticias en japones",web_search_news,japones
+"busca noticias de economia",web_search_news,economia
+"busca noticias de IA",web_search_news,IA
+"busca noticias de gaming",web_search_news,gaming
+"busca noticias de chile",web_search_news,chile
+"busca noticias de bitcoin",web_search_news,bitcoin
+"busca noticias de salud",web_search_news,salud
+"busca noticias de ciberseguridad",web_search_news,ciberseguridad
+"busca noticias de formula 1",web_search_news,formula 1
+"busca noticias de spaceX",web_search_news,spaceX
+"crea un informe pdf en el escritorio",create_pdf,informe
+"hazme un pdf del informe de ventas",create_pdf,informe de ventas
+"crea pdf de resumen semanal",create_pdf,resumen semanal
+"genera un pdf de tareas pendientes",create_pdf,tareas pendientes
+"necesito un pdf del laboratorio",create_pdf,laboratorio
+"create a pdf for project update",create_pdf,project update
+"crea un PDF de presupuesto abril",create_pdf,presupuesto abril
+"haz un pdf de la minuta",create_pdf,minuta
+"crea pdf con plan de estudio",create_pdf,plan de estudio
+"genera pdf del reporte mensual",create_pdf,reporte mensual
+"reproduce AD/DC",play_music,AD/DC
+"reprodece AD DC",play_music,AD DC
+"reproduce aiaia",play_music,aiaia
+"pon bohemian rhapsody",play_music,bohemian rhapsody
+"pon musica de metallica",play_music,metallica
+"pon la cancion thriller",play_music,thriller
+"reproduce coldplay viva la vida",play_music,coldplay viva la vida
+"play daft punk around the world",play_music,daft punk around the world
+"pon cancion de shakira",play_music,shakira
+"reproduce dragon ball opening",play_music,dragon ball opening
+"pon musica chill",play_music,chill
+"reproduce soundtrack interstellar",play_music,interstellar
+"pon rosalia despecha",play_music,rosalia despecha
+"play song blinding lights",play_music,blinding lights
+"reproduce queen dont stop me now",play_music,queen dont stop me now
+"pon mi mix diario",play_music,mix diario
+"reproduce top hits 2020",play_music,top hits 2020
+"pon lofi beats",play_music,lofi beats
+"reproduce rock en espanol",play_music,rock en espanol
+"pon musica para estudiar",play_music,musica para estudiar
+"abre spotify y reproduce mis me gusta",open_and_play_liked,mis me gusta
+"pon mis favs",open_and_play_liked,favs
+"play my liked songs",open_and_play_liked,liked songs
+"pon mis canciones favoritas",open_and_play_liked,favoritas
+"reproduce mis me gusta",open_and_play_liked,me gusta
+"abre spotify con mis liked",open_and_play_liked,liked
+"pon liked songs",open_and_play_liked,liked songs
+"reproduce favs",open_and_play_liked,favs
+"pon mis likes",open_and_play_liked,likes
+"play liked",open_and_play_liked,liked
+"cierra chrome",close_app,chrome
+"cierra spotify",close_app,spotify
+"cierra discord",close_app,discord
+"cierra vscode",close_app,vscode
+"cierra steam",close_app,steam
+"cierra telegram",close_app,telegram
+"cierra edge",close_app,edge
+"cierra el notepad",close_app,notepad
+"close chrome",close_app,chrome
+"close discord",close_app,discord
+"abre el chrome",open_app,chrome
+"abre chrome",open_app,chrome
+"abre spotify",open_app,spotify
+"abre steam",open_app,steam
+"abre discord",open_app,discord
+"abre telegram",open_app,telegram
+"abre visual studio code",open_app,visual studio code
+"open chrome",open_app,chrome
+"open spotify",open_app,spotify
+"abre notepad",open_app,notepad
+"what is that?",conversation_explanation,that
+"qué es eso?",conversation_explanation,eso
+"que significa esto?",conversation_explanation,esto
+"why is this happening?",conversation_explanation,this
+"como funciona eso?",conversation_explanation,eso
+"how does it work?",conversation_explanation,it
+"me explicas eso?",conversation_explanation,eso
+"can you explain this?",conversation_explanation,this
+"por que pasa eso?",conversation_explanation,eso
+"what does that mean?",conversation_explanation,that

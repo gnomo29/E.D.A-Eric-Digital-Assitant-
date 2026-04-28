@@ -71,6 +71,8 @@ class CommandOrchestrator:
         self._pending_organization_plan: dict[str, Any] | None = None
         self._spotify_pending: dict[str, Any] | None = None
         self._pending_risky_action: dict[str, str] | None = None
+        self._pending_close_app_confirm: dict[str, str] | None = None
+        self._pending_pdf_overwrite: dict[str, str] | None = None
         self._pending_mobile_opt_in = False
         self.mobile_connector = TelegramConnector()
         self._telegram_offset = 0
@@ -170,6 +172,70 @@ class CommandOrchestrator:
         except Exception:
             return 0.78
 
+    @staticmethod
+    def _extract_video_search_query(text: str) -> str:
+        low = (text or "").strip().lower()
+        m = re.search(r"(?:abre|busca|search)\s+(?:videos?|video)\s+(?:de|sobre)?\s*(.+)$", low)
+        if not m:
+            return ""
+        return m.group(1).strip(" .,:;!?")
+
+    @staticmethod
+    def _extract_news_query(text: str) -> tuple[str, str]:
+        low = (text or "").strip().lower()
+        m = re.search(r"busca\s+noticias(?:\s+en\s+([a-záéíóúñ]+))?(?:\s+sobre\s+(.+))?$", low)
+        if not m:
+            return "", ""
+        lang = (m.group(1) or "").strip()
+        topic = (m.group(2) or "últimas noticias").strip()
+        return lang, topic
+
+    @staticmethod
+    def _extract_pdf_request(text: str) -> tuple[str, str]:
+        low = (text or "").strip().lower()
+        if "pdf" not in low:
+            return "", ""
+        title = "informe"
+        mt = re.search(r"(?:pdf\s+del?|informe\s+de)\s+(.+?)(?:\s+en\s+|$)", low)
+        if mt and mt.group(1).strip():
+            title = mt.group(1).strip()
+        target = "escritorio" if ("escritorio" in low or "desktop" in low) else "data/exports"
+        return title, target
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", (name or "informe").strip())
+        return cleaned[:64] or "informe"
+
+    def _route_create_pdf(self, title: str, target_hint: str) -> str:
+        home = Path.home()
+        if target_hint == "escritorio":
+            desktop = home / "Desktop"
+            alt = home / "Escritorio"
+            base = desktop if desktop.exists() else alt
+            if not base.exists():
+                base = config.DATA_DIR / "exports"
+        else:
+            base = config.DATA_DIR / "exports"
+        base.mkdir(parents=True, exist_ok=True)
+        out = base / f"{self._safe_filename(title)}.pdf"
+        if out.exists() and self._pending_pdf_overwrite is None:
+            self._pending_pdf_overwrite = {"path": str(out), "title": title}
+            return f"El archivo {out} ya existe. ¿Deseas sobrescribirlo? (Sí/No)"
+        content = (
+            "%PDF-1.1\n"
+            "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+            "2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj\n"
+            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj\n"
+            f"4 0 obj << /Length {len(title) + 48} >> stream\nBT /F1 18 Tf 72 720 Td ({title}) Tj ET\nendstream endobj\n"
+            "xref\n0 5\n0000000000 65535 f \n"
+            "0000000010 00000 n \n0000000060 00000 n \n0000000117 00000 n \n0000000207 00000 n \n"
+            "trailer << /Root 1 0 R /Size 5 >>\nstartxref\n300\n%%EOF\n"
+        )
+        out.write_text(content, encoding="latin-1", errors="ignore")
+        self._pending_pdf_overwrite = None
+        return f"PDF creado en: {out}"
+
     def orchestrate(self, text: str) -> OrchestrationResult:
         clean = (text or "").strip()
         if not clean:
@@ -257,6 +323,29 @@ class CommandOrchestrator:
                 "Hay una acción crítica pendiente. Responde Sí para ejecutar o No para cancelar.",
                 "risky_action_waiting_confirmation",
             )
+        if self._pending_close_app_confirm is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                target = self._pending_close_app_confirm.get("target", "")
+                self._pending_close_app_confirm = None
+                result = self.actions.close_app(target)
+                return OrchestrationResult(True, result.get("message", f"Cerré {target}."), "close_app_confirmed")
+            if decision is False:
+                self._pending_close_app_confirm = None
+                return OrchestrationResult(True, "Listo, no cerraré la aplicación.", "close_app_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para confirmar cierre de aplicación.", "close_app_wait")
+        if self._pending_pdf_overwrite is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                pending = dict(self._pending_pdf_overwrite)
+                self._pending_pdf_overwrite = None
+                title = pending.get("title", "informe")
+                target = "escritorio" if ("Desktop" in pending.get("path", "") or "Escritorio" in pending.get("path", "")) else "data/exports"
+                return OrchestrationResult(True, self._route_create_pdf(title, target), "create_pdf_overwrite")
+            if decision is False:
+                self._pending_pdf_overwrite = None
+                return OrchestrationResult(True, "Cancelado, no sobrescribí el PDF.", "create_pdf_cancelled")
+            return OrchestrationResult(True, "Responde Sí o No para sobrescribir el PDF.", "create_pdf_wait")
 
         risk_preview = self._build_risk_preview(clean)
         if risk_preview:
@@ -302,6 +391,33 @@ class CommandOrchestrator:
                 self._route_play_music(track_query, preferred_app=app, utterance=clean),
                 "play_music",
             )
+        video_q = self._extract_video_search_query(clean)
+        if video_q:
+            if self.web_solver is not None:
+                solved = self.web_solver.solve(f"videos {video_q}", auto_save_code=False)
+                out = solved.get("answer", f"Top-5 resultados de video para {video_q}.")
+                log.info("[ORCHESTRATOR] route chosen: open_media_search (score=%s)", conf_str)
+                return OrchestrationResult(True, out, "open_media_search")
+            return OrchestrationResult(True, f"No tengo solver web activo, pero buscaría videos de {video_q}.", "open_media_search")
+
+        pdf_title, pdf_target = self._extract_pdf_request(clean)
+        if pdf_title:
+            log.info("[ORCHESTRATOR] route chosen: create_pdf (score=%s)", conf_str)
+            return OrchestrationResult(True, self._route_create_pdf(pdf_title, pdf_target), "create_pdf")
+
+        news_lang, news_topic = self._extract_news_query(clean)
+        if news_lang or "noticias" in clean.lower():
+            prompt = f"noticias {news_topic}".strip()
+            if news_lang:
+                prompt = f"{prompt} en {news_lang}"
+            if remote_llm.remote_search_mode_requested() and remote_llm.is_remote_fully_configured():
+                ans = self.core.filtered_remote_research_answer(prompt)
+                log.info("[ORCHESTRATOR] route chosen: web_search_news_remote (score=%s)", conf_str)
+                return OrchestrationResult(True, ans, "web_search_news")
+            if self.web_solver is not None:
+                solved = self.web_solver.solve(prompt, auto_save_code=False)
+                return OrchestrationResult(True, solved.get("answer", "No pude traer noticias ahora."), "web_search_news")
+            return OrchestrationResult(True, "No tengo motor de noticias disponible en este momento.", "web_search_news")
 
         nav = self.actions.execute_navigation_command(clean)
         if nav is not None:
@@ -406,6 +522,13 @@ class CommandOrchestrator:
 
         if intent == "close_app":
             target = parsed.entity or clean
+            if any(k in target.lower() for k in ("chrome", "edge", "firefox", "brave")):
+                self._pending_close_app_confirm = {"target": target}
+                return OrchestrationResult(
+                    True,
+                    f"Vas a cerrar {target}. Podrías perder pestañas o datos no guardados. ¿Confirmas? (Sí/No)",
+                    "close_app_confirm_required",
+                )
             result = self.actions.close_app(target)
             return OrchestrationResult(True, result.get("message", "Intenté cerrar la aplicación."), "close_app")
 

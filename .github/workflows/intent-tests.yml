@@ -1,0 +1,43 @@
+name: Intent Tests CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+  push:
+    branches:
+      - ops/intent-tests-full
+
+jobs:
+  intent-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run intent tests (CI mode)
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          python tools/intent_test_run.py --ci > intent_tests_ci_output.json
+          cat intent_tests_ci_output.json
+
+      - name: Upload intent test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: intent_tests_report
+          path: |
+            intent_tests_ci_output.json
+            logs/intent_test_report.json
+            logs/intent_test_run.log
