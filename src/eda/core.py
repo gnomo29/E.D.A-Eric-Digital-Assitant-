@@ -16,6 +16,7 @@ from . import config
 from .logger import get_logger
 from . import remote_llm
 from .memory import MemoryManager
+from . import web_execution_gate
 from .utils import build_http_session, has_internet_connectivity
 from .web_search import WebSearch
 
@@ -34,6 +35,7 @@ class EDACore:
         self.web_search = WebSearch()
         self.memory = memory_manager or MemoryManager()
         self.http = build_http_session()
+        self._last_release_ts = 0.0
 
     SEARCH_COMMAND_REGEX = re.compile(
         r"\b(busca|buscar|búscame|buscame|search|googlea|googleame)\b\s*(.*)",
@@ -146,6 +148,37 @@ class EDACore:
         log.info("[MEMORY] ✗ No encontrado, buscando en línea...")
         return ""
 
+    def _gather_web_digest(self, query: str, max_results: int = 5) -> str:
+        """Texto agregado de snippets (solo heurística local; no pasa por Ollama)."""
+        q = (query or "").strip()
+        if len(q) < 2:
+            return ""
+        results = self.web_search.search_google_snippets(q, max_results=max_results)
+        if not results:
+            results = self.web_search.search(q, max_results=max_results)
+        lines: list[str] = []
+        for i, item in enumerate(results[:max_results]):
+            title = str(item.get("title", "") or "").strip()
+            sn = str(item.get("snippet", "") or item.get("body", "") or "").strip()
+            url = str(item.get("url", "") or item.get("href", "") or "").strip()
+            block = "\n".join(x for x in (f"[{i+1}] {title}", sn, url) if x)
+            if block.strip():
+                lines.append(block)
+        return "\n\n".join(lines)[:14_000]
+
+    def filtered_remote_research_answer(self, question: str) -> str:
+        """Investigación vía digest local + síntesis obligatoria en LLM remoto (no toca Ollama con web cruda)."""
+        if not remote_llm.remote_deep_research_pipeline_available():
+            return remote_llm.RemoteUnavailableMsg
+        digest = self._gather_web_digest(question)
+        if not digest.strip():
+            return "No pude obtener resultados de búsqueda para sintetizar. Reformulá la consulta o reintenta."
+        synth = remote_llm.synthesize_filtered_web_answer(question, digest)
+        if synth:
+            web_execution_gate.arm_after_external_research()
+            return f"[Investigación segura — remoto]\n{synth}"
+        return "El servicio de síntesis remota no respondió; revisá API key y límites del proveedor."
+
     def _search_and_learn(self, query: str, max_results: int = 3, source: str = "web_search") -> str:
         if len(query) < 3:
             return "Según mi búsqueda en línea, necesito una pregunta más específica para ayudarte mejor."
@@ -153,6 +186,20 @@ class EDACore:
         memory_answer = self._get_memory_answer(query)
         if memory_answer:
             return memory_answer
+
+        if remote_llm.remote_deep_research_pipeline_available():
+            digest = self._gather_web_digest(query, max_results=max_results)
+            if not digest.strip():
+                return "Según mi búsqueda en línea, no encontré resultados útiles en este momento."
+            synth = remote_llm.synthesize_filtered_web_answer(query, digest)
+            if not synth.strip():
+                return "Según mi búsqueda en línea, no obtuve síntesis del servicio remoto."
+            web_execution_gate.arm_after_external_research()
+            compact = self._strip_web_prefix(synth)
+            topic = self._derive_knowledge_topic(query)
+            log.info("[MEMORY] ✓ Guardando conocimiento (síntesis remota): %s", topic)
+            self.memory.save_knowledge(topic=topic, question=query, answer=compact, source=f"{source}_remote")
+            return f"Según mi búsqueda en línea (modelo remoto), {compact}"
 
         results = self.web_search.search_google_snippets(query, max_results=max_results)
         if not results:
@@ -373,6 +420,34 @@ class EDACore:
 
         return False
 
+    def _maybe_release_ollama_memory(self, *, force: bool = False) -> None:
+        """
+        Pide a Ollama liberar keep-alive si la RAM está bajo presión.
+        Esto ayuda a recuperar ~centenas de MB tras periodos de inactividad/carga.
+        """
+        now = time.time()
+        if not bool(getattr(config, "EDA_RELEASE_OLLAMA_MEMORY", True)):
+            return
+        if not force and now - self._last_release_ts < 45:
+            return
+        if not force and not self._is_low_memory_condition():
+            return
+        try:
+            self.http.post(
+                self.endpoint,
+                json={
+                    "model": self._choose_model(),
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": "0s",
+                },
+                timeout=6,
+            )
+            self._last_release_ts = now
+            log.info("[CORE] Solicité liberación de memoria Ollama (keep_alive=0s).")
+        except Exception as exc:
+            log.debug("[CORE] No se pudo liberar memoria Ollama: %s", exc)
+
     def detect_incapability(self, answer: str) -> bool:
         """Detecta frases típicas de incapacidad para activar AUTO_LEARN."""
         normalized = (answer or "").strip().lower()
@@ -506,6 +581,7 @@ class EDACore:
                 return _finish(content or "No tengo una respuesta totalmente confiable para eso en este momento.", "ollama_low_quality_no_web")
 
             gc.collect()
+            self._maybe_release_ollama_memory()
             return _finish(content, "ollama")
         except Exception as exc:
             log.error("Error en Ollama: %s", exc)
@@ -519,4 +595,5 @@ class EDACore:
                 web_answer = self._web_search_fallback_answer(message)
                 if web_answer:
                     return _finish(web_answer, "web_fallback_error")
+            self._maybe_release_ollama_memory(force=True)
             return _finish(self._fallback_answer(message), "degraded_error")

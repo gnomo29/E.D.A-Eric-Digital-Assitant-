@@ -24,15 +24,22 @@ import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from eda.action_agent import ActionAgent
 from eda.actions import ActionController
+from eda.core import EDACore
+from eda.memory import MemoryManager
 from eda.mouse_keyboard import MouseKeyboardController
+from eda.orchestrator import CommandOrchestrator
 from eda.stt import STTManager
+from eda.system_info import SystemInfo
 from eda.system_observer import SystemObserver
 from eda.task_membership import TaskMembershipStore
+from eda.web_solver import WebSolver
 
 try:
     import customtkinter as ctk  # type: ignore
@@ -150,6 +157,19 @@ class EDABaseUI:
             task_store=TaskMembershipStore(),
             observer=SystemObserver(),
         )
+        self.memory = MemoryManager()
+        self.core = EDACore(memory_manager=self.memory)
+        self.system_info = SystemInfo()
+        self.web_solver = WebSolver(self.core, self.memory)
+        self.orchestrator = CommandOrchestrator(
+            memory=self.memory,
+            core=self.core,
+            action_agent=self.action_agent,
+            actions=self.action_agent.actions,
+            system_info=self.system_info,
+            web_solver=self.web_solver,
+            can_execute=lambda _text: True,
+        )
         self.stt = stt or STTManager(language="es-ES")
 
         self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
@@ -257,9 +277,11 @@ class EDABaseUI:
                     save_trusted_hash(hash_command(text))
                     self._trusted_hashes.add(hash_command(text))
 
-            handled, answer = self.action_agent.try_handle(text)
-            if not handled:
-                answer = "No pude ejecutar ese comando como acción directa."
+            result = self.orchestrator.orchestrate(text)
+            handled = bool(result.handled)
+            answer = (result.answer or "").strip()
+            if not answer:
+                answer = "No reconozco ese comando, intenta decir 'abre [app]' o 'reproduce [música]'."
 
             def ui_done() -> None:
                 self.append_assistant_bubble(answer)
@@ -545,7 +567,7 @@ def _make_eda_ctk_ui_class():
         def _add_bubble(self, text: str, *, by_user: bool, system_header: bool) -> None:
             row = len(self.chat_view.winfo_children())
             wrap = ctk.CTkFrame(self.chat_view, fg_color=PANEL)
-            wrap.grid(row=row, column=0, sticky="ew", pady=5, padx=8)
+            wrap.grid(row=row, column=0, sticky="ew", pady=(9, 6), padx=(12, 24 if by_user else 10))
             wrap.grid_columnconfigure(0, weight=1)
     
             bubble = ctk.CTkFrame(
@@ -555,7 +577,7 @@ def _make_eda_ctk_ui_class():
                 border_color=BORDER,
                 corner_radius=6,
             )
-            bubble.grid(sticky="e" if by_user else "w")
+            bubble.grid(sticky="e" if by_user else "w", padx=(0, 16 if by_user else 0))
             if not by_user and system_header:
                 ctk.CTkLabel(
                     bubble,

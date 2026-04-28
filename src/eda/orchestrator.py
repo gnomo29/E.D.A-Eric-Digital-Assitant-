@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import re
+import json
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import quote_plus
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from .logger import get_logger
+from . import config
+from . import remote_llm
+from . import web_execution_gate
 from .nlp_utils import detect_confirmation, parse_command
+from .connectors.spotify import route_spotify_natural, try_handle_spotify_pending
 from .spotify_web import try_play_via_web_api
 from .vision import VisionService
 from .background_tasks import BackgroundReminderWorker
-from .connectors.mobile import MobileConnector
+from .connectors.mobile import TelegramConnector
+from .security.remote_acl import RemoteACL
+from .security.otp_manager import OTPManager
 from skills.document_specialist import create_presentation
 
 log = get_logger("orchestrator")
@@ -60,11 +69,22 @@ class CommandOrchestrator:
         self.can_execute = can_execute
         self.vision = vision or VisionService()
         self._pending_organization_plan: dict[str, Any] | None = None
+        self._spotify_pending: dict[str, Any] | None = None
         self._pending_risky_action: dict[str, str] | None = None
         self._pending_mobile_opt_in = False
-        self.mobile_connector = MobileConnector()
+        self.mobile_connector = TelegramConnector()
+        self._telegram_offset = 0
         self.reminder_worker = BackgroundReminderWorker()
         self.reminder_worker.start()
+        self._webhook_thread = None
+        self._webhook_queue_path = config.DATA_DIR / "queue" / "telegram_queue.jsonl"
+        self._webhook_queue_offset = 0
+        self.remote_acl = RemoteACL()
+        self.otp_manager = OTPManager(ttl_seconds=int(getattr(config, "REMOTE_OTP_TTL_SECONDS", 120)))
+        self._remote_rate_window: dict[str, list[datetime]] = {}
+        self._bootstrap_audit_log_path = config.BASE_DIR / "logs" / "bootstrap_actions.log"
+        self._remote_audit_log_path = config.BASE_DIR / "logs" / "remote_commands.log"
+        self._bootstrap_remote_mode()
 
     @staticmethod
     def _split_app_query(entity: str) -> tuple[str, str]:
@@ -75,13 +95,92 @@ class CommandOrchestrator:
         app, query = entity.split("|||", 1)
         return app.strip(), query.strip()
 
+    @staticmethod
+    def _is_likely_music_request(text: str) -> bool:
+        low = (text or "").strip().lower()
+        if not low:
+            return False
+        starts = ("reproduce ", "pon ", "ponme ", "escucha ", "play ")
+        if any(low.startswith(s) for s in starts):
+            return True
+        music_markers = (
+            "spotify",
+            "playlist",
+            "álbum",
+            "album",
+            "canción",
+            "track",
+            "artista",
+            "mis me gusta",
+            "liked songs",
+        )
+        return any(m in low for m in music_markers)
+
+    @staticmethod
+    def _is_likely_system_command(text: str) -> bool:
+        low = (text or "").strip().lower()
+        command_roots = (
+            "abre ",
+            "abrir ",
+            "inicia ",
+            "cierra ",
+            "cerrar ",
+            "ejecuta ",
+            "corre ",
+            "borra ",
+            "elimina ",
+            "mueve ",
+            "sube ",
+            "baja ",
+            "silencia",
+            "mutea",
+            "desmutea",
+        )
+        return any(low.startswith(root) for root in command_roots)
+
+    @staticmethod
+    def _is_likely_conversational_query(text: str) -> bool:
+        clean = (text or "").strip()
+        if not clean:
+            return False
+        low = clean.lower()
+        if clean.endswith("?"):
+            return True
+        markers = (
+            "qué es",
+            "que es",
+            "cómo",
+            "como ",
+            "por qué",
+            "por que",
+            "explícame",
+            "explicame",
+            "dime",
+            "cuál",
+            "cual",
+            "quién",
+            "quien",
+        )
+        return any(m in low for m in markers)
+
+    @staticmethod
+    def _command_conf_threshold() -> float:
+        try:
+            return float(getattr(config, "EDA_COMMAND_CONFIDENCE_THRESHOLD", 0.78))
+        except Exception:
+            return 0.78
+
     def orchestrate(self, text: str) -> OrchestrationResult:
         clean = (text or "").strip()
         if not clean:
             return OrchestrationResult(True, "", "empty")
         low = clean.lower()
 
-        if low in {"deshaz lo último", "deshaz lo ultimo"}:
+        if web_execution_gate.text_disarms_gate(clean):
+            web_execution_gate.disarm()
+            return OrchestrationResult(True, "Acciones locales desbloqueadas; podés usar comandos otra vez.", "web_gate_disarmed")
+
+        if low in {"deshaz lo último", "deshaz lo ultimo", "deshazlo"}:
             result = self.actions.undo_last_action()
             return OrchestrationResult(True, result.get("message", ""), "undo_last_action")
 
@@ -133,8 +232,10 @@ class CommandOrchestrator:
             provider = parts[0].lower()
             token = parts[1]
             chat_id = parts[2] if len(parts) >= 3 else ""
-            self.mobile_connector.save_opt_in(provider=provider, token=token, telegram_chat_id=chat_id)
-            return OrchestrationResult(True, "Conector móvil configurado en modo Opt-In.", "mobile_configured")
+            if provider != "telegram":
+                return OrchestrationResult(True, "Por ahora solo está habilitado Telegram.", "mobile_config_invalid")
+            self.mobile_connector.save_opt_in(token=token, telegram_chat_id=chat_id)
+            return OrchestrationResult(True, "Telegram configurado en modo Opt-In.", "mobile_configured")
 
         if self.can_execute and not self.can_execute(clean):
             return OrchestrationResult(True, "Acción bloqueada por permisos/configuración.", "security")
@@ -181,17 +282,47 @@ class CommandOrchestrator:
                 "organize_directory_waiting_confirmation",
             )
 
-        handled, answer = self.action_agent.try_handle(clean)
-        if handled:
-            return OrchestrationResult(True, answer, "action_agent")
+        spotify_pending_answer = try_handle_spotify_pending(self, clean)
+        if spotify_pending_answer is not None:
+            return OrchestrationResult(True, spotify_pending_answer, "spotify_pending")
+
+        parsed = parse_command(clean)
+        intent = parsed.intent
+        conf_str = f"{float(parsed.confidence or 0.0):.2f}"
+        log.info("[ORCHESTRATOR] Intent detected: %s | entity=%s | conf=%s", intent, parsed.entity, conf_str)
+
+        # Prioridad dura de música: evita que "reproduce X" caiga al ActionAgent.
+        if self._is_likely_music_request(clean) or intent in {"play_music", "open_and_play_music"}:
+            app, query = self._split_app_query(parsed.entity)
+            track_query = query if query else (parsed.entity or clean)
+            route_score = f"{max(0.86, float(parsed.confidence or 0.0)):.2f}"
+            log.info("[ORCHESTRATOR] route chosen: spotify (score=%s)", route_score)
+            return OrchestrationResult(
+                True,
+                self._route_play_music(track_query, preferred_app=app, utterance=clean),
+                "play_music",
+            )
 
         nav = self.actions.execute_navigation_command(clean)
         if nav is not None:
             return OrchestrationResult(True, nav.get("message", "Comando de navegación ejecutado."), "navigation")
 
-        parsed = parse_command(clean)
-        intent = parsed.intent
-        log.info("[ORCHESTRATOR] Intent detected: %s | entity=%s", intent, parsed.entity)
+        # Si parece conversación y no comando de sistema, responder con LLM en vez de "acción directa".
+        if (
+            self._is_likely_conversational_query(clean)
+            and not self._is_likely_system_command(clean)
+            and float(parsed.confidence or 0.0) < self._command_conf_threshold()
+        ):
+            mem = self.memory.get_memory()
+            history = mem.get("chat_history", []) or mem.get("history", [])
+            log.info("[ORCHESTRATOR] route chosen: llm_conversation (score=%s)", conf_str)
+            answer = self.core.ask(clean, history=history, allow_web_fallback=self._should_use_web_for_question(clean, intent))
+            return OrchestrationResult(True, f"Te explico: {answer}", "conversation_llm")
+
+        handled, answer = self.action_agent.try_handle(clean)
+        if handled:
+            log.info("[ORCHESTRATOR] route chosen: action_agent (score=%s)", conf_str)
+            return OrchestrationResult(True, answer, "action_agent")
 
         if intent in {
             "theoretical_question",
@@ -202,10 +333,16 @@ class CommandOrchestrator:
         }:
             response_instruction = self._response_instruction_for_intent(intent)
             use_web = self._should_use_web_for_question(clean, intent)
-            route = "core_direct_answer" if not use_web else "core_web_allowed"
-            log.info("[ORCHESTRATOR] Route: %s", route)
             mem = self.memory.get_memory()
             history = mem.get("chat_history", []) or mem.get("history", [])
+            if use_web and remote_llm.remote_search_mode_requested():
+                if not remote_llm.is_remote_fully_configured():
+                    return OrchestrationResult(True, remote_llm.RemoteUnavailableMsg, "remote_search_misconfigured")
+                answer = self.core.filtered_remote_research_answer(clean)
+                log.info("[ORCHESTRATOR] route chosen: remote_secured_research (score=%s)", conf_str)
+                return OrchestrationResult(True, answer, "remote_secured_research")
+            route = "core_direct_answer" if not use_web else "core_web_allowed"
+            log.info("[ORCHESTRATOR] route chosen: %s (score=%s)", route, conf_str)
             answer = self.core.ask(
                 clean,
                 history=history,
@@ -215,12 +352,6 @@ class CommandOrchestrator:
             if not use_web:
                 log.info("[ORCHESTRATOR] Fallback: web search not used")
             return OrchestrationResult(True, answer, "knowledge_answer")
-
-        if intent in {"play_music", "open_and_play_music"}:
-            app, query = self._split_app_query(parsed.entity)
-            track_query = query if query else (parsed.entity or clean)
-            log.info("[ORCHESTRATOR] Route: spotify_playback")
-            return OrchestrationResult(True, self._route_play_music(track_query, preferred_app=app), "play_music")
 
         if intent in {"search_in_app", "open_and_search_in_app"}:
             app, query = self._split_app_query(parsed.entity)
@@ -285,7 +416,14 @@ class CommandOrchestrator:
             return OrchestrationResult(True, self._handle_brightness(clean), "brightness")
 
         if intent in {"search_web", "search_request", "arduino_help"} and self.web_solver is not None:
+            if remote_llm.remote_search_mode_requested() and not remote_llm.is_remote_fully_configured():
+                return OrchestrationResult(True, remote_llm.RemoteUnavailableMsg, "remote_search_misconfigured")
+            if remote_llm.remote_search_mode_requested() and remote_llm.is_remote_fully_configured():
+                answer = self.core.filtered_remote_research_answer(clean)
+                log.info("[ORCHESTRATOR] route chosen: remote_secured_research (score=%s)", conf_str)
+                return OrchestrationResult(True, answer, "remote_secured_research")
             solved = self.web_solver.solve(clean, auto_save_code=True)
+            log.info("[ORCHESTRATOR] route chosen: web_solver (score=%s)", conf_str)
             return OrchestrationResult(True, solved.get("answer", "No tengo respuesta por ahora."), "web_solver")
 
         if intent == "system_info" and self.system_info is not None:
@@ -297,6 +435,194 @@ class CommandOrchestrator:
         history = mem.get("chat_history", []) or mem.get("history", [])
         answer = self.core.ask(clean, history=history)
         return OrchestrationResult(True, answer, "core")
+
+    def _bootstrap_remote_mode(self) -> None:
+        mode = str(getattr(config, "TELEGRAM_CONTROL_MODE", "polling")).strip().lower()
+        if mode != "webhook":
+            return
+        try:
+            from .webhook.telegram_webhook import start_webhook_thread
+
+            self._webhook_thread = start_webhook_thread(
+                telegram_connector=self.mobile_connector,
+                host=str(getattr(config, "TELEGRAM_WEBHOOK_HOST", "127.0.0.1")),
+                port=int(getattr(config, "TELEGRAM_WEBHOOK_PORT", 8088)),
+            )
+            if getattr(config, "TELEGRAM_WEBHOOK_USE_NGROK", False):
+                log.info("[ORCHESTRATOR] Webhook mode activo. Use ngrok para exponer localhost de forma controlada.")
+            else:
+                log.info("[ORCHESTRATOR] Webhook mode activo en localhost.")
+        except Exception as exc:
+            log.warning("[ORCHESTRATOR] No pude iniciar webhook mode: %s", exc)
+
+    def poll_remote_commands(self) -> list[OrchestrationResult]:
+        """Procesa comandos remotos entrantes desde Telegram del chat dueño."""
+        mode = str(getattr(config, "TELEGRAM_CONTROL_MODE", "polling")).strip().lower()
+        if mode == "webhook":
+            return self._poll_webhook_queue()
+        batch = self.mobile_connector.fetch_updates(offset=self._telegram_offset)
+        if batch.get("status") != "ok":
+            return []
+        self._telegram_offset = int(batch.get("next_offset", self._telegram_offset))
+        results: list[OrchestrationResult] = []
+        for item in batch.get("updates", []):
+            if not isinstance(item, dict):
+                continue
+            chat_id = str(item.get("chat_id", "")).strip()
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            result = self._process_remote_command(text=text, chat_id=chat_id, source="telegram_polling")
+            results.append(result)
+            # Enviar confirmación al dueño.
+            self.mobile_connector.enviar_mensaje(f"[EDA remoto] {result.answer}")
+        return results
+
+    def _poll_webhook_queue(self) -> list[OrchestrationResult]:
+        queue_path = self._webhook_queue_path
+        if not queue_path.exists():
+            return []
+        results: list[OrchestrationResult] = []
+        with queue_path.open("r", encoding="utf-8") as fh:
+            fh.seek(self._webhook_queue_offset)
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                text = str(item.get("command_text", "")).strip()
+                chat_id = str(item.get("chat_id", "")).strip()
+                if not text:
+                    continue
+                result = self._process_remote_command(text=text, chat_id=chat_id, source="telegram_webhook")
+                results.append(result)
+                self.mobile_connector.enviar_mensaje(f"[EDA remoto] {result.answer}")
+            self._webhook_queue_offset = fh.tell()
+        return results
+
+    @staticmethod
+    def _obfuscate_chat_id(chat_id: str) -> str:
+        text = (chat_id or "").strip()
+        if len(text) <= 4:
+            return "***"
+        return f"{text[:2]}****{text[-2:]}"
+
+    def _append_audit_jsonl(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _audit_remote_attempt(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        outcome: str,
+        reason: str = "",
+        level: str = "",
+        source: str = "",
+    ) -> None:
+        stamp = datetime.now().isoformat(timespec="seconds")
+        payload_hash = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+        entry = {
+            "timestamp": stamp,
+            "chat_id": self._obfuscate_chat_id(chat_id),
+            "action_name": (text.split()[0].lower() if text else "empty"),
+            "level": level,
+            "source": source,
+            "outcome": outcome,
+            "reason": reason,
+            "raw_payload_hash": payload_hash,
+        }
+        self._append_audit_jsonl(self._remote_audit_log_path, entry)
+        self._append_audit_jsonl(self._bootstrap_audit_log_path, {"event": "remote_command", **entry})
+
+    def _rate_limited(self, chat_id: str) -> bool:
+        key = (chat_id or "unknown").strip() or "unknown"
+        now = datetime.now()
+        limit = int(getattr(config, "REMOTE_RATE_LIMIT_PER_MINUTE", 5))
+        window = self._remote_rate_window.setdefault(key, [])
+        cutoff = now - timedelta(minutes=1)
+        window[:] = [ts for ts in window if ts >= cutoff]
+        if len(window) >= limit:
+            return True
+        window.append(now)
+        return False
+
+    def _process_remote_command(self, *, text: str, chat_id: str, source: str) -> OrchestrationResult:
+        clean = (text or "").strip()
+        owner_chat_id = self.mobile_connector.get_owner_chat_id()
+        remote_chat = (chat_id or owner_chat_id or "owner").strip()
+
+        if self._rate_limited(remote_chat):
+            self._audit_remote_attempt(
+                chat_id=remote_chat,
+                text=clean,
+                outcome="rejected",
+                reason="rate_limit",
+                source=source,
+            )
+            return OrchestrationResult(True, "Rate limit remoto alcanzado (5/min). Espera un minuto.", "remote_rate_limit")
+
+        lowered = clean.lower()
+        if lowered.startswith("confirm "):
+            otp = clean.split(" ", 1)[1].strip() if " " in clean else ""
+            verified = self.otp_manager.verify(remote_chat, otp)
+            if not verified.get("ok"):
+                reason = str(verified.get("reason", "otp_invalid"))
+                self._audit_remote_attempt(chat_id=remote_chat, text=clean, outcome="rejected", reason=reason, source=source)
+                if self.otp_manager.should_alert_failed_otp(remote_chat):
+                    self.mobile_connector.enviar_mensaje("Alerta: 3 intentos fallidos de OTP en 10 minutos.")
+                return OrchestrationResult(True, "OTP inválido o expirado.", "remote_otp_invalid")
+            approved_command = str(verified.get("command", "")).strip()
+            self._audit_remote_attempt(
+                chat_id=remote_chat,
+                text=approved_command,
+                outcome="approved",
+                reason="otp_confirmed",
+                level="critical",
+                source=source,
+            )
+            return self.orchestrate(approved_command)
+
+        acl = self.remote_acl.classify(clean)
+        if not acl.allowed:
+            self._audit_remote_attempt(
+                chat_id=remote_chat,
+                text=clean,
+                outcome="rejected",
+                reason=acl.reason or "acl_blocked",
+                level=acl.level,
+                source=source,
+            )
+            return OrchestrationResult(True, "Comando remoto bloqueado por ACL.", "remote_acl_blocked")
+
+        if acl.level == "critical":
+            otp = self.otp_manager.issue(remote_chat, clean)
+            self.mobile_connector.enviar_mensaje(f"Confirmación requerida. Envía: confirm {otp} (expira en 2 min)")
+            self._audit_remote_attempt(
+                chat_id=remote_chat,
+                text=clean,
+                outcome="challenged",
+                reason="otp_required",
+                level=acl.level,
+                source=source,
+            )
+            return OrchestrationResult(True, "Acción crítica detectada. OTP enviado por Telegram.", "remote_otp_challenge")
+
+        result = self.orchestrate(clean)
+        self._audit_remote_attempt(
+            chat_id=remote_chat,
+            text=clean,
+            outcome="executed",
+            reason="ok",
+            level=acl.level,
+            source=source,
+        )
+        return result
 
     @staticmethod
     def _build_risk_preview(text: str) -> str:
@@ -355,9 +681,27 @@ class CommandOrchestrator:
         freshness_markers = ("hoy", "actualmente", "última", "ultima", "reciente", "este año", "2026", "noticia")
         return any(marker in lowered for marker in freshness_markers)
 
-    def _route_play_music(self, query: str, preferred_app: str = "") -> str:
+    def _audit_operate_secure(self, event: str, detail: str, extra: dict[str, Any] | None = None) -> None:
+        path = config.BASE_DIR / "logs" / "operate_secure_audit.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "step": "orchestrator",
+            "event": event,
+            "detail": detail[:260],
+        }
+        if extra:
+            payload.update(extra)
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            log.warning("[ORCHESTRATOR] No pude escribir audit log: %s", exc)
+
+    def _route_play_music(self, query: str, preferred_app: str = "", utterance: str = "") -> str:
         q = (query or "").strip()
-        if not q:
+        utt = (utterance or q or "").strip()
+        if not q and not utt:
             return "Necesito el nombre de la canción, artista o álbum para reproducir."
 
         app = (preferred_app or "spotify").lower().strip()
@@ -367,12 +711,31 @@ class CommandOrchestrator:
 
         self.actions.open_app("spotify")
 
+        try:
+            smart = route_spotify_natural(self, utt, q)
+            if smart is not None:
+                if smart.lower().startswith("reproduciendo"):
+                    return smart
+                return f"Buscando {q or utt} en Spotify... {smart}"
+        except Exception as exc:
+            log.warning("[ORCHESTRATOR] spotify natural route: %s", exc)
+
         # Prioridad 1: Spotify Web API (si está configurada y hay dispositivo activo).
         try:
-            status, detail = try_play_via_web_api(q)
+            status, detail = try_play_via_web_api(q or utt)
             if status == "ok":
                 log.info("[ORCHESTRATOR] Playback success via spotify_web_api")
-                return f"Reproduciendo {q} en Spotify."
+                return f"Buscando {q or utt} en Spotify... Reproduciendo ahora."
+            if status == "fail" and detail == "no_active_device":
+                self._audit_operate_secure(
+                    "audio_device_failure",
+                    "Spotify sin dispositivo activo para reproducción",
+                    {"query": (q or utt)[:160]},
+                )
+                return (
+                    "No encontré un dispositivo de audio activo en Spotify. "
+                    "Registré el incidente en seguridad operativa y te lo notifico por UI."
+                )
             log.info("[ORCHESTRATOR] spotify_web_api status=%s detail=%s", status, detail)
         except Exception as exc:
             log.warning("[ORCHESTRATOR] spotify_web_api exception: %s", exc)
@@ -382,13 +745,17 @@ class CommandOrchestrator:
         opened_uri = self.actions.open_website(uri)
         if opened_uri.get("status") == "ok":
             log.info("[ORCHESTRATOR] Fallback route used: spotify_uri_search")
-            return f"Abrí Spotify y dejé lista la búsqueda de {q} para reproducción."
+            return f"Buscando {q or utt} en Spotify..."
 
         # Prioridad 3: Web de Spotify como último fallback.
-        web_url = f"https://open.spotify.com/search/{quote_plus(q)}/tracks"
+        web_url = f"https://open.spotify.com/search/{quote_plus(q or utt)}/tracks"
         self.actions.open_website(web_url)
         log.info("[ORCHESTRATOR] Fallback route used: spotify_web_search")
-        return f"No pude reproducir directamente; abrí Spotify con resultados para {q}."
+        # Robustez adicional: si no era música, intentar como aplicación.
+        app_attempt = self.actions.open_app(q or utt)
+        if app_attempt.get("status") == "ok":
+            return app_attempt.get("message", f"Abrí {(q or utt)} como aplicación.")
+        return "No encontré esa app o canción, ¿te refieres a otra cosa?"
 
     def _route_search_in_app(self, app_name: str, query: str) -> str:
         app = (app_name or "").strip().lower()
