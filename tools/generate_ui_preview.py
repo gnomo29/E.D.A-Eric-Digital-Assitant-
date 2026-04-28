@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Genera assets/ui_preview.png (1280x720) estilo prototipo Obsidian."""
+"""Genera data/resources/assets/ui_preview.png (1280x720) estilo prototipo Obsidian."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "assets" / "ui_preview.png"
+OUT = ROOT / "data" / "resources" / "assets" / "ui_preview.png"
 
 BG = (5, 5, 5)
 PANEL = (13, 13, 13)

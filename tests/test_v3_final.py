@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from eda.background_tasks import BackgroundReminderWorker
-from eda.connectors.mobile import MobileConnector
+from eda.connectors.mobile import MobileConnector, TelegramConnector
 from eda.orchestrator import CommandOrchestrator
 from eda.plugin_loader import PluginLoader
 from eda.undo_manager import UndoManager
@@ -104,6 +104,17 @@ class V3FinalTests(unittest.TestCase):
             result = connector.enviar_mensaje("hola")
             self.assertEqual(result.get("status"), "disabled")
 
+    @patch("eda.connectors.mobile.requests.post")
+    def test_telegram_send_message_mock(self, mock_post) -> None:
+        mock_post.return_value = MagicMock(status_code=200)
+        with tempfile.TemporaryDirectory() as td:
+            config_file = Path(td) / "mobile.json"
+            connector = TelegramConnector(config_file=config_file)
+            connector.save_opt_in(token="123:abc", telegram_chat_id="999")
+            result = connector.enviar_mensaje("estado")
+        self.assertEqual(result.get("status"), "ok")
+        mock_post.assert_called_once()
+
     def _build_orch(self) -> CommandOrchestrator:
         memory = MagicMock()
         memory.get_memory.return_value = {"chat_history": []}
@@ -120,6 +131,28 @@ class V3FinalTests(unittest.TestCase):
         with patch.object(orch.mobile_connector, "config", type("C", (), {"enabled": False})()):
             result = orch.orchestrate("enviar mensaje al móvil: hola")
         self.assertEqual(result.source, "mobile_opt_in_prompt")
+
+    @patch("eda.connectors.mobile.requests.get")
+    @patch("eda.connectors.mobile.requests.post")
+    def test_orchestrator_processes_owner_telegram_commands(self, mock_post, mock_get) -> None:
+        mock_post.return_value = MagicMock(status_code=200)
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 10,
+                        "message": {"text": "estado", "chat": {"id": "12345"}},
+                    }
+                ],
+            },
+        )
+        orch = self._build_orch()
+        with patch.object(orch.mobile_connector, "config", type("C", (), {"enabled": True, "telegram_chat_id": "12345"})()):
+            with patch.object(orch.mobile_connector, "_load_token", return_value="tok"):
+                results = orch.poll_remote_commands()
+        self.assertEqual(len(results), 1)
 
     def test_orchestrator_mobile_opt_in_reject(self) -> None:
         orch = self._build_orch()

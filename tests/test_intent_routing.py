@@ -156,7 +156,7 @@ class IntentRoutingIntegrationTests(unittest.TestCase):
         self.assertIn("confirmas", first.answer.lower())
         second = orch.orchestrate("sí")
         self.assertEqual("close_app_confirmed", second.source)
-        actions.close_app.assert_called()
+        actions.close_app_robust.assert_called()
 
     def test_question_goes_to_llm(self) -> None:
         orch, _actions, _ag, core, _ws = self._build_orchestrator()
@@ -190,7 +190,31 @@ class IntentRoutingIntegrationTests(unittest.TestCase):
         ]
         orch, _actions, _ag, _core, _ws = self._build_orchestrator()
         result = orch.orchestrate("muestrame un video de gatitos")
-        self.assertEqual("play_youtube", result.source)
+        self.assertEqual("search_youtube_query", result.source)
+
+    @patch("eda.orchestrator.validate_youtube_url", return_value=True)
+    def test_youtube_direct_url_routes_to_url_handler(self, _valid: MagicMock) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("reproduce https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertEqual("play_youtube_url", result.source)
+
+    @patch("eda.orchestrator.channel_lookup_candidates")
+    @patch("eda.orchestrator.validate_youtube_url", return_value=True)
+    def test_youtube_creator_routes_channel_lookup(self, _valid: MagicMock, mock_lookup: MagicMock) -> None:
+        mock_lookup.return_value = [
+            {
+                "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "video_id": "dQw4w9WgXcQ",
+                "title": "Vegeta777 latest",
+                "channel": "Vegeta777",
+                "thumbnail": "",
+                "confidence": "0.91",
+                "source": "api",
+            }
+        ]
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("reproduce vegeta777")
+        self.assertEqual("channel_lookup", result.source)
 
 
 class UISmokeMockedTests(unittest.TestCase):

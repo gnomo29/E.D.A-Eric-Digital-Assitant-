@@ -17,9 +17,13 @@ Los triggers permiten ejecutar acciones cuando el usuario dice una frase especí
 ## Seguridad
 - Si `require_confirm=true`, pide confirmación antes de ejecutar.
 - `run_script` está bloqueado por defecto.
-- Se registra auditoría en `logs/operate_secure_audit.jsonl`.
-- Límite de ejecución: `TRIGGERS_RATE_LIMIT_PER_MIN` (por defecto 3/min).
+- Se registra auditoría en `data/logs/operate_secure_audit.jsonl`.
 
 ## Comandos de chat
 - `listar mis disparadores`
 - `crear disparador: cuando diga 'ironman' reproduce acdc`
+
+## Nota YouTube en triggers
+- Cuando un trigger usa `play_youtube`, el asistente primero busca y muestra candidatos (top resultados) antes de abrir.
+- Solo abre automáticamente si `YOUTUBE_AUTO_OPEN=true` y la confianza supera `YT_AUTO_OPEN_CONF`.
+- Toda búsqueda/selección se audita en `data/logs/search_history.jsonl`.

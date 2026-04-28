@@ -22,7 +22,7 @@ python -m unittest tests.test_intent_routing -v
 python tools/intent_test_run.py
 ```
 
-`tools/intent_test_run.py` genera `logs/intent_test_report.json` con precisión/recall, matriz de confusión, top-3 candidatos y pico de RSS.
+`tools/intent_test_run.py` genera `data/logs/intent_test_report.json` con precisión/recall, matriz de confusión, top-3 candidatos y pico de RSS.
 
 ## 3) Pruebas manuales de ruteo en UI
 
@@ -46,8 +46,8 @@ python tools/intent_test_run.py
 
 ## 5) Logs de ruteo a inspeccionar
 
-- `logs/eda.log` (o logger configurado): líneas `route chosen: ... (score=...)`
-- `logs/operate_secure_audit.jsonl`: fallos operativos como `audio_device_failure`
+- `data/logs/eda.log` (o logger configurado): líneas `route chosen: ... (score=...)`
+- `data/logs/operate_secure_audit.jsonl`: fallos operativos como `audio_device_failure`
 
 ## 6) Triggers y YouTube
 
@@ -59,14 +59,12 @@ python tools/intent_test_run.py
   - `TRIGGERS_ALLOW_RUN_SCRIPTS=0`
 - Dominios permitidos para YouTube:
   - `YT_DOMAIN_WHITELIST=youtube.com,youtu.be`
-- Rate-limit de triggers:
-  - `TRIGGERS_RATE_LIMIT_PER_MIN=3`
 
 ## 7) Cleanup seguro / rollback
 
 - Auditoría de limpieza:
   - `python tools/cleanup_audit.py`
 - Backup generado por cleanup:
-  - `backups/cleanup_backup_*.tar.gz`
+  - `data/backups/manual/cleanup_backup_*.tar.gz`
 - Rollback de emergencia:
-  - `bash tools/rollback_cleanup.sh backups/cleanup_backup_TIMESTAMP.tar.gz <commit_before_cleanup>`
+  - `bash tools/rollback_cleanup.sh data/backups/manual/cleanup_backup_TIMESTAMP.tar.gz <commit_before_cleanup>`

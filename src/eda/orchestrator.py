@@ -10,19 +10,22 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import quote_plus
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .logger import get_logger
 from . import config
 from . import remote_llm
 from . import web_execution_gate
-from .nlp_utils import detect_confirmation, parse_command
+from .nlp_utils import detect_confirmation, detect_confirmation_mode, parse_command
 from .connectors.spotify import route_spotify_natural, try_handle_spotify_pending
 from .connectors.youtube import (
-    detect_youtube_intent,
+    classify_youtube_intent,
+    channel_lookup_candidates,
     extract_youtube_candidates_from_text,
+    is_suspicious_result_for_query,
     search_youtube_candidates,
     validate_youtube_url,
+    fetch_youtube_oembed,
 )
 from .spotify_web import try_play_via_web_api
 from .triggers import TriggerStore, normalize_phrase
@@ -31,6 +34,7 @@ from .background_tasks import BackgroundReminderWorker
 from .connectors.mobile import TelegramConnector
 from .security.remote_acl import RemoteACL
 from .security.otp_manager import OTPManager
+from .qa import QAService
 from skills.document_specialist import create_presentation
 
 log = get_logger("orchestrator")
@@ -43,6 +47,7 @@ class OrchestrationResult:
     handled: bool
     answer: str
     source: str
+    payload: dict[str, Any] | None = None
 
 
 class CommandOrchestrator:
@@ -79,14 +84,16 @@ class CommandOrchestrator:
         self._pending_organization_plan: dict[str, Any] | None = None
         self._spotify_pending: dict[str, Any] | None = None
         self._pending_risky_action: dict[str, str] | None = None
-        self._pending_close_app_confirm: dict[str, str] | None = None
         self._pending_pdf_overwrite: dict[str, str] | None = None
         self._pending_shutdown_confirm = False
         self._pending_restart_confirm = False
         self._pending_trigger_create: dict[str, Any] | None = None
         self._pending_trigger_execute: dict[str, Any] | None = None
         self._pending_youtube_options: list[dict[str, str]] = []
+        self._pending_youtube_confirm: dict[str, str] | None = None
+        self._pending_youtube_query = ""
         self._pending_mobile_opt_in = False
+        self._pending_confirmation: dict[str, Any] | None = None
         self.mobile_connector = TelegramConnector()
         self._telegram_offset = 0
         self.reminder_worker = BackgroundReminderWorker()
@@ -97,9 +104,10 @@ class CommandOrchestrator:
         self.remote_acl = RemoteACL()
         self.triggers = TriggerStore()
         self.otp_manager = OTPManager(ttl_seconds=int(getattr(config, "REMOTE_OTP_TTL_SECONDS", 120)))
-        self._remote_rate_window: dict[str, list[datetime]] = {}
-        self._bootstrap_audit_log_path = config.BASE_DIR / "logs" / "bootstrap_actions.log"
-        self._remote_audit_log_path = config.BASE_DIR / "logs" / "remote_commands.log"
+        self.qa = QAService()
+        self._bootstrap_audit_log_path = config.LOGS_DIR / "bootstrap_actions.log"
+        self._remote_audit_log_path = config.LOGS_DIR / "remote_commands.log"
+        self._youtube_log_path = config.LOGS_DIR / "search_history.jsonl"
         self._bootstrap_remote_mode()
 
     @staticmethod
@@ -256,6 +264,30 @@ class CommandOrchestrator:
             return OrchestrationResult(True, "", "empty")
         low = clean.lower()
 
+        force_close_match = re.match(r"^\s*(?:forzar|force|kill)\s+(?:cerrar|cierra|close)\s+(.+)$", low)
+        if force_close_match:
+            target = force_close_match.group(1).strip()
+            result = self.actions.close_app_robust(target, force=True)
+            return OrchestrationResult(True, result.get("message", f"Forcé cierre de {target}."), "close_app_forced")
+
+        # Confirmación genérica para entradas cortas (UI/STT) con timeout.
+        if self._pending_confirmation is not None:
+            created = float(self._pending_confirmation.get("created_at", 0.0))
+            if (datetime.now().timestamp() - created) > float(self._pending_confirmation.get("timeout_sec", 30)):
+                self._pending_confirmation = None
+            else:
+                mode = detect_confirmation_mode(clean)
+                if mode in {"yes", "no", "force"}:
+                    pending = dict(self._pending_confirmation)
+                    self._pending_confirmation = None
+                    if pending.get("kind") == "close_app":
+                        target = str(pending.get("target", "")).strip()
+                        if mode == "no":
+                            return OrchestrationResult(True, "Listo, no cerraré la aplicación.", "close_app_cancelled")
+                        result = self.actions.close_app_robust(target, force=(mode == "force"))
+                        src = "close_app_forced" if mode == "force" else "close_app_confirmed"
+                        return OrchestrationResult(True, result.get("message", f"Intenté cerrar {target}."), src)
+
         if self._pending_youtube_options:
             choice = low.strip()
             if choice in {"1", "2", "3"}:
@@ -263,12 +295,62 @@ class CommandOrchestrator:
                 if 0 <= idx < len(self._pending_youtube_options):
                     chosen = self._pending_youtube_options[idx]
                     self._pending_youtube_options = []
+                    self._release_ollama_for_low_ram()
                     webbrowser.open(chosen["url"])
+                    self._log_youtube_search(
+                        user_query=self._pending_youtube_query or clean,
+                        top_candidates=[],
+                        chosen_video=chosen,
+                        action="opened",
+                        source=str(chosen.get("source", "unknown")),
+                    )
                     return OrchestrationResult(True, f"Abriendo YouTube: {chosen['url']}", "youtube_choice")
             if detect_confirmation(clean) is False:
+                self._log_youtube_search(
+                    user_query=self._pending_youtube_query or clean,
+                    top_candidates=self._pending_youtube_options,
+                    chosen_video=None,
+                    action="ignored",
+                    source="selection",
+                )
                 self._pending_youtube_options = []
                 return OrchestrationResult(True, "Cancelado, no abrí YouTube.", "youtube_choice_cancel")
             return OrchestrationResult(True, "Elige 1, 2 o 3 para abrir un resultado de YouTube.", "youtube_choice_wait")
+        if self._pending_youtube_confirm is not None:
+            decision = detect_confirmation(clean)
+            if decision is True:
+                chosen = dict(self._pending_youtube_confirm)
+                self._pending_youtube_confirm = None
+                url = str(chosen.get("url", "")).strip()
+                if not validate_youtube_url(url):
+                    return OrchestrationResult(True, "Ese enlace ya no parece válido/safe de YouTube.", "youtube_confirm_invalid")
+                self._release_ollama_for_low_ram()
+                webbrowser.open(url)
+                self._log_youtube_search(
+                    user_query=self._pending_youtube_query or clean,
+                    top_candidates=[chosen],
+                    chosen_video=chosen,
+                    action="opened",
+                    source=str(chosen.get("source", "unknown")),
+                )
+                return OrchestrationResult(True, f"Abriendo YouTube: {url}", "youtube_confirm_open")
+            if decision is False:
+                self._log_youtube_search(
+                    user_query=self._pending_youtube_query or clean,
+                    top_candidates=[self._pending_youtube_confirm],
+                    chosen_video=None,
+                    action="ignored",
+                    source="confirm",
+                )
+                self._pending_youtube_confirm = None
+                return OrchestrationResult(True, "Cancelado, no abrí el video.", "youtube_confirm_cancel")
+            cand = dict(self._pending_youtube_confirm)
+            return OrchestrationResult(
+                True,
+                f"Encontré este video: {cand.get('title','video')} ({cand.get('channel','canal')}). ¿Quieres que lo reproduzca? (Sí/No)",
+                "youtube_confirm_wait",
+                payload={"youtube_confirm": cand},
+            )
 
         if self._pending_trigger_create is not None:
             decision = detect_confirmation(clean)
@@ -330,10 +412,11 @@ class CommandOrchestrator:
                 "trigger_create_confirm",
             )
 
-        if detect_youtube_intent(clean):
-            yt = self._route_play_youtube(clean)
-            if yt:
-                return OrchestrationResult(True, yt, "play_youtube")
+        yt_intent = classify_youtube_intent(clean)
+        if yt_intent and not re.match(r"^\s*(abre|abrir|open)\s+", low):
+            yt_answer, yt_source, yt_payload = self._route_play_youtube(clean, yt_intent)
+            if yt_answer:
+                return OrchestrationResult(True, yt_answer, yt_source, yt_payload)
         identity_facts = self.memory.update_user_profile_from_text(clean)
         if identity_facts:
             self.memory.save_long_term_memory(
@@ -360,8 +443,6 @@ class CommandOrchestrator:
             )
 
         trig_match = self.triggers.match(clean)
-        if trig_match and trig_match.get("rate_limited"):
-            return OrchestrationResult(True, "Rate limit de triggers alcanzado (3/min).", "trigger_rate_limit")
         if trig_match and trig_match.get("trigger"):
             t = trig_match["trigger"]
             if bool(t.get("require_confirm")):
@@ -467,17 +548,6 @@ class CommandOrchestrator:
                 "Hay una acción crítica pendiente. Responde Sí para ejecutar o No para cancelar.",
                 "risky_action_waiting_confirmation",
             )
-        if self._pending_close_app_confirm is not None:
-            decision = detect_confirmation(clean)
-            if decision is True:
-                target = self._pending_close_app_confirm.get("target", "")
-                self._pending_close_app_confirm = None
-                result = self.actions.close_app(target)
-                return OrchestrationResult(True, result.get("message", f"Cerré {target}."), "close_app_confirmed")
-            if decision is False:
-                self._pending_close_app_confirm = None
-                return OrchestrationResult(True, "Listo, no cerraré la aplicación.", "close_app_cancelled")
-            return OrchestrationResult(True, "Responde Sí o No para confirmar cierre de aplicación.", "close_app_wait")
         if self._pending_pdf_overwrite is not None:
             decision = detect_confirmation(clean)
             if decision is True:
@@ -611,6 +681,9 @@ class CommandOrchestrator:
             "explanation_request",
             "debugging_request",
         }:
+            qa_answer, qa_source = self.qa.answer(clean)
+            if qa_answer:
+                return OrchestrationResult(True, qa_answer, qa_source)
             response_instruction = self._response_instruction_for_intent(intent)
             use_web = self._should_use_web_for_question(clean, intent)
             mem = self.memory.get_memory()
@@ -722,14 +795,25 @@ class CommandOrchestrator:
 
         if intent == "close_app":
             target = parsed.entity or clean
+            force_now = bool(re.search(r"\b(forzar|force|kill)\b", clean.lower()))
+            target = re.sub(r"\b(forzar|force|kill)\b", "", target, flags=re.IGNORECASE).strip()
+            if force_now:
+                result = self.actions.close_app_robust(target, force=True)
+                return OrchestrationResult(True, result.get("message", f"Forcé cierre de {target}."), "close_app_forced")
             if any(k in target.lower() for k in ("chrome", "edge", "firefox", "brave")):
-                self._pending_close_app_confirm = {"target": target}
+                self._pending_confirmation = {
+                    "kind": "close_app",
+                    "target": target,
+                    "created_at": datetime.now().timestamp(),
+                    "timeout_sec": 30.0,
+                    "caller": "close_app_intent",
+                }
                 return OrchestrationResult(
                     True,
-                    f"Vas a cerrar {target}. Podrías perder pestañas o datos no guardados. ¿Confirmas? (Sí/No)",
+                    f"Vas a cerrar {target}. Podrías perder pestañas o datos no guardados. ¿Confirmas? (Sí/No, o 'forzar')",
                     "close_app_confirm_required",
                 )
-            result = self.actions.close_app(target)
+            result = self.actions.close_app_robust(target, force=False)
             return OrchestrationResult(True, result.get("message", "Intenté cerrar la aplicación."), "close_app")
 
         if intent == "volume":
@@ -863,32 +947,10 @@ class CommandOrchestrator:
         self._append_audit_jsonl(self._remote_audit_log_path, entry)
         self._append_audit_jsonl(self._bootstrap_audit_log_path, {"event": "remote_command", **entry})
 
-    def _rate_limited(self, chat_id: str) -> bool:
-        key = (chat_id or "unknown").strip() or "unknown"
-        now = datetime.now()
-        limit = int(getattr(config, "REMOTE_RATE_LIMIT_PER_MINUTE", 5))
-        window = self._remote_rate_window.setdefault(key, [])
-        cutoff = now - timedelta(minutes=1)
-        window[:] = [ts for ts in window if ts >= cutoff]
-        if len(window) >= limit:
-            return True
-        window.append(now)
-        return False
-
     def _process_remote_command(self, *, text: str, chat_id: str, source: str) -> OrchestrationResult:
         clean = (text or "").strip()
         owner_chat_id = self.mobile_connector.get_owner_chat_id()
         remote_chat = (chat_id or owner_chat_id or "owner").strip()
-
-        if self._rate_limited(remote_chat):
-            self._audit_remote_attempt(
-                chat_id=remote_chat,
-                text=clean,
-                outcome="rejected",
-                reason="rate_limit",
-                source=source,
-            )
-            return OrchestrationResult(True, "Rate limit remoto alcanzado (5/min). Espera un minuto.", "remote_rate_limit")
 
         lowered = clean.lower()
         if lowered.startswith("confirm "):
@@ -1004,8 +1066,14 @@ class CommandOrchestrator:
         freshness_markers = ("hoy", "actualmente", "última", "ultima", "reciente", "este año", "2026", "noticia")
         return any(marker in lowered for marker in freshness_markers)
 
+    def set_youtube_auto_open(self, enabled: bool) -> None:
+        try:
+            config.YOUTUBE_AUTO_OPEN = bool(enabled)
+        except Exception:
+            pass
+
     def _audit_operate_secure(self, event: str, detail: str, extra: dict[str, Any] | None = None) -> None:
-        path = config.BASE_DIR / "logs" / "operate_secure_audit.jsonl"
+        path = config.LOGS_DIR / "operate_secure_audit.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1251,22 +1319,138 @@ class CommandOrchestrator:
             return result.get("message", "Script ejecutado.")
         return "Acción de trigger no soportada."
 
-    def _route_play_youtube(self, utterance: str) -> str:
+    def _route_play_youtube(self, utterance: str, intent_kind: str) -> tuple[str, str, dict[str, Any] | None]:
         urls = extract_youtube_candidates_from_text(utterance)
-        if urls and validate_youtube_url(urls[0]["url"]):
-            webbrowser.open(urls[0]["url"])
-            return f"Abriendo YouTube: {urls[0]['url']}"
+        if intent_kind == "play_youtube_url" and urls:
+            direct = urls[0]
+            if not validate_youtube_url(str(direct.get("url", ""))):
+                return "La URL de YouTube no pasó validación.", "play_youtube_url", None
+            meta = fetch_youtube_oembed(str(direct.get("url", "")))
+            cand = {
+                "url": str(direct.get("url", "")).strip(),
+                "video_id": str(direct.get("video_id", "")).strip(),
+                "title": meta.get("title") or str(direct.get("title", "Video de YouTube")),
+                "channel": meta.get("channel") or str(direct.get("channel", "unknown")),
+                "thumbnail": meta.get("thumbnail") or str(direct.get("thumbnail", "")),
+                "duration": "",
+                "confidence": "0.99",
+                "source": "url",
+            }
+            self._pending_youtube_query = utterance
+            require_confirm = bool(getattr(config, "YT_REQUIRE_CONFIRM", True))
+            if not require_confirm:
+                self._release_ollama_for_low_ram()
+                webbrowser.open(cand["url"])
+                self._log_youtube_search(utterance, [cand], cand, "opened", "url")
+                return f"Abriendo YouTube: {cand['url']}", "play_youtube_url", {"youtube_candidates": [cand], "tts": self._youtube_tts_summary([cand])}
+            self._pending_youtube_confirm = cand
+            return (
+                f"Encontré este video: {cand['title']} ({cand['channel']}). ¿Quieres que lo reproduzca? (Sí/No)",
+                "play_youtube_url",
+                {"youtube_candidates": [cand], "tts": self._youtube_tts_summary([cand])},
+            )
+
         query = re.sub(r"^(reproduce|muestrame un video de|muéstrame un video de|abre un video de)\s+", "", utterance, flags=re.I).strip()
-        cands = search_youtube_candidates(query or utterance)
-        cands = [c for c in cands if validate_youtube_url(c.get("url", ""))]
+        if intent_kind == "channel_lookup":
+            query = query or utterance.replace("reproduce", "").strip()
+            cands = channel_lookup_candidates(query)
+            source = "channel_lookup"
+        else:
+            cands = search_youtube_candidates(query or utterance)
+            source = "search_youtube_query"
+        cands = [c for c in cands if validate_youtube_url(str(c.get("url", "")))]
         if not cands:
-            return ""
-        if len(cands) == 1:
-            webbrowser.open(cands[0]["url"])
-            return f"Abriendo YouTube: {cands[0]['url']}"
-        self._pending_youtube_options = cands[:3]
-        lines = [f"{i+1}) {c.get('title','video')} - {c.get('url','')}" for i, c in enumerate(self._pending_youtube_options)]
-        return "Encontré estos videos:\n" + "\n".join(lines) + "\nElige 1/2/3."
+            self._log_youtube_search(utterance, [], None, "ignored", source)
+            return "No encontré resultados de YouTube válidos para esa consulta.", source, None
+
+        self._pending_youtube_query = query or utterance
+        top = cands[:5]
+        self._pending_youtube_options = top
+        top_conf = float(str(top[0].get("confidence", "0.0")))
+        # Modo transparente: siempre presentar opciones y pedir elección explícita.
+        auto_open = False
+        conf_min = float(getattr(config, "YT_AUTO_OPEN_CONF", 0.95))
+        auto_skip_memes = bool(getattr(config, "YT_AUTO_SKIP_KNOWN_MEMES", False))
+        suspicious = is_suspicious_result_for_query(
+            self._pending_youtube_query,
+            str(top[0].get("title", "")),
+            str(top[0].get("channel", "")),
+        )
+        if auto_open and top_conf >= conf_min and not (auto_skip_memes and suspicious):
+            chosen = dict(top[0])
+            self._pending_youtube_options = []
+            self._release_ollama_for_low_ram()
+            webbrowser.open(str(chosen.get("url", "")))
+            self._log_youtube_search(self._pending_youtube_query, top, chosen, "opened", str(chosen.get("source", source)))
+            return f"Auto-open habilitado. Abriendo: {chosen.get('title','video')}", source, {"youtube_candidates": top, "tts": self._youtube_tts_summary(top)}
+
+        lines = [
+            f"{i+1}) {c.get('title','video')} — {c.get('channel','canal')} (conf {c.get('confidence','0.0')})"
+            for i, c in enumerate(top)
+        ]
+        answer = "He encontrado estos videos:\n" + "\n".join(lines) + "\nElige 1/2/3. ¿Cuál abro?"
+        if intent_kind == "channel_lookup":
+            answer = (
+                "Encontré videos del creador/canal solicitado. Opciones: último video, más popular o top-5.\n"
+                + "\n".join(lines)
+                + "\nElige 1/2/3. ¿Cuál abro?"
+            )
+        return answer, source, {"youtube_candidates": top, "tts": self._youtube_tts_summary(top)}
+
+    def _release_ollama_for_low_ram(self) -> None:
+        releaser = getattr(self.core, "_maybe_release_ollama_memory", None)
+        if callable(releaser):
+            try:
+                releaser(force=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _youtube_tts_summary(cands: list[dict[str, str]]) -> str:
+        if not cands:
+            return "No encontré videos para esa consulta."
+        head = cands[:3]
+        parts = [f"{i+1}: {c.get('title','video')} de {c.get('channel','canal')}" for i, c in enumerate(head)]
+        return f"He encontrado {len(cands)} videos. " + ". ".join(parts) + ". ¿Cuál abro?"
+
+    def _log_youtube_search(
+        self,
+        user_query: str,
+        top_candidates: list[dict[str, Any]],
+        chosen_video: dict[str, Any] | None,
+        action: str,
+        source: str,
+    ) -> None:
+        row = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "user_query": (user_query or "")[:280],
+            "top_candidates": [
+                {
+                    "video_id": str(c.get("video_id", "")),
+                    "title": str(c.get("title", ""))[:180],
+                    "channel": str(c.get("channel", ""))[:120],
+                    "confidence": str(c.get("confidence", "")),
+                }
+                for c in (top_candidates or [])[:5]
+            ],
+            "chosen_video": (
+                {
+                    "video_id": str(chosen_video.get("video_id", "")),
+                    "title": str(chosen_video.get("title", ""))[:180],
+                    "channel": str(chosen_video.get("channel", ""))[:120],
+                }
+                if chosen_video
+                else None
+            ),
+            "action": action,
+            "source": source,
+        }
+        try:
+            self._youtube_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._youtube_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _handle_volume(self, text: str) -> str:
         low = (text or "").lower()

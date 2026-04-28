@@ -1,15 +1,24 @@
-# Documentación E.D.A.
+# Documentacion E.D.A. (ordenada para empezar desde cero)
 
-- `GUIA_NOVATO_CODIGO.md` — qué hace cada módulo y por dónde empezar.
-- `GUIA_LIBRERIAS_Y_EXTENSIONES.md` — dependencias y buenas prácticas.
-- `EJEMPLOS_CAPACIDADES_EDA.txt` — frases de ejemplo para probar la GUI y la voz.
-- `operational_runbook.md` — smoke checks, pruebas manuales y comandos de verificación.
-- `CHANGELOG.md` — cambios recientes de operación/orquestación.
-- Voz en Windows: ver sección de troubleshooting en `../README.md` (PyAudio, pipwin, Build Tools, conda).
+## Ruta recomendada para alguien nuevo
 
-Los lanzadores unificados están en la raíz: `../INICIAR_ASISTENTE.bat` y `../iniciar.sh`.
+1. `00_EMPIEZA_AQUI.md` (arranque sin conocimientos tecnicos)
+2. `01_MAPA_DEL_PROYECTO.md` (entender como se divide el sistema)
+3. `GUIA_NOVATO_CODIGO.md` (que archivo tocar segun objetivo)
+4. `02_PRIMERA_CONTRIBUCION.md` (hacer un cambio seguro con pruebas)
 
-El código canónico de la aplicación está en **`../src/eda/`**.
-Compatibilidad: el paquete `eda` en raíz funciona como shim para imports históricos.
+## Referencias tecnicas
 
-Variables de entorno opcionales (p. ej. LLM remoto): ver **`../.env.example`** en la raíz del repo.
+- `GUIA_LIBRERIAS_Y_EXTENSIONES.md` — dependencias y buenas practicas.
+- `operational_runbook.md` — smoke checks y comandos operativos.
+- `CHANGELOG.md` — cambios técnicos del stack/app.
+- `CHANGELOG_PROJECT.md` — changelog general del repositorio.
+- `CONTRIBUTING_PROJECT.md` — guía de contribución.
+- `spotify_integration.md` — detalles de integracion Spotify.
+- `triggers.md` — flujo de triggers/automatizaciones.
+
+## Notas clave del proyecto
+
+- Lanzador recomendado: `../INICIAR_ASISTENTE.bat`
+- Codigo canónico: `../src/eda/`
+- Variables opcionales: `../.env.example`

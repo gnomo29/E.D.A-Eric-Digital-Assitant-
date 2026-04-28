@@ -35,7 +35,7 @@ Se abre el navegador, aceptás permisos y el token se guarda en **`.cache/spotif
 
 - Módulo canónico del conector: `src/eda/connectors/spotify.py`.
 - **Umbrales** (configurables por entorno): `EDA_SPOTIFY_CONF_AUTO`, `EDA_SPOTIFY_CONF_AMBIG_LOW` (ver `src/eda/config.py`).
-- **Historial de acciones**: JSONL en `logs/spotify_actions.jsonl` (sin tokens en claro).
+- **Historial de acciones**: JSONL en `data/logs/spotify_actions.jsonl` (sin tokens en claro).
 - **Transferencia de dispositivo**: si `EDA_SPOTIFY_TRANSFER_REQUIRES_CONFIRM=1`, se pide **Sí/No** antes de mover la reproducción.
 - **Aclaración**: si hay varios candidatos de álbum o lista, el chat muestra hasta **3 opciones**; respondé `1`, `2` o `3`.
 

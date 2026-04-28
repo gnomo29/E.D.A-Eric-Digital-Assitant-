@@ -8,7 +8,7 @@ version = "2.0.0"
 description = "E.D.A. — asistente local con voz, GUI y autoaprendizaje controlado"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Proprietary" }
+license = { text = "MIT" }
 dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.32.0",
@@ -35,4 +35,5 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["eda*"]

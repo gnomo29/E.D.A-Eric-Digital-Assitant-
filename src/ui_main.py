@@ -39,6 +39,7 @@ from eda.stt import STTManager
 from eda.system_info import SystemInfo
 from eda.system_observer import SystemObserver
 from eda.task_membership import TaskMembershipStore
+from eda.tts import TTSManager
 from eda.web_solver import WebSolver
 
 try:
@@ -61,7 +62,7 @@ USER_BUBBLE = "#1a1a1a"
 
 DEFAULT_METRICS_INTERVAL_MS = int(os.getenv("EDA_UI_METRICS_MS", "2000"))
 
-AUDIT_PATH = ROOT / "logs" / "operate_secure_audit.jsonl"
+AUDIT_PATH = ROOT / "data" / "logs" / "operate_secure_audit.jsonl"
 TRUST_PATH = ROOT / "config" / "ui_action_trust.json"
 
 
@@ -171,6 +172,7 @@ class EDABaseUI:
             can_execute=lambda _text: True,
         )
         self.stt = stt or STTManager(language="es-ES")
+        self.tts = TTSManager()
 
         self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="eda-worker")
@@ -180,6 +182,12 @@ class EDABaseUI:
 
         self._approval_events: dict[str, threading.Event] = {}
         self._approval_results: dict[str, dict[str, Any]] = {}
+        self.continuous_wake_word = "eda"
+        self.continuous_sensitivity = 0.6
+        self.continuous_post_window = 5.0
+        self.continuous_allow_non_destructive = False
+        self.continuous_enabled = False
+        self._continuous_state = "idle"
 
         self.rotate_btn_ref: Any = None
 
@@ -204,6 +212,10 @@ class EDABaseUI:
 
     def append_log_line(self, category: str, message: str) -> None:
         raise NotImplementedError
+
+    def render_youtube_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        # Hook opcional: algunas variantes UI/tests no renderizan tarjetas.
+        _ = candidates
 
     # --- Core flow ---
     def run_async(self, fn: Callable[[], None]) -> None:
@@ -320,6 +332,16 @@ class EDABaseUI:
                     self.append_log_line("TRIGGER", f"Trigger ejecutado: {getattr(result, 'source', '')}")
                 if memory_updated:
                     self.append_log_line("MEMORY", "Memoria actualizada: perfil persistente")
+                payload = getattr(result, "payload", None) or {}
+                candidates = payload.get("youtube_candidates", [])
+                if isinstance(candidates, list) and candidates:
+                    self.render_youtube_candidates(candidates[:5])
+                    tts_text = str(payload.get("tts", "")).strip()
+                    if tts_text:
+                        self.tts.speak_async(tts_text)
+                elif answer:
+                    # Voz por defecto para respuestas generales y Q&A.
+                    self.tts.speak_async(answer)
                 self.set_send_enabled(True)
 
             self.run_async(ui_done)
@@ -357,9 +379,55 @@ class EDABaseUI:
     def on_close(self) -> None:
         self._stop_event.set()
         try:
+            self.stt.stop_continuous_listener()
+        except Exception:
+            pass
+        try:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
+
+    def _set_listen_state_visual(self, state: str, confidence: float) -> None:
+        _ = (state, confidence)
+
+    def _on_continuous_state(self, state: str, confidence: float) -> None:
+        self._continuous_state = state
+        self.run_async(lambda: self._set_listen_state_visual(state, confidence))
+
+    def _on_continuous_wakeword(self, heard: str) -> None:
+        msg = "He escuchado 'eda'. Puedes dar la orden ahora."
+        self.run_async(lambda: self.append_assistant_bubble(msg))
+        self.tts.speak_async(msg)
+        self.append_log_line("VOICE", f"Wakeword detectada (confianza variable). Texto: {heard[:80]}")
+
+    def _on_continuous_command(self, command: str) -> None:
+        cleaned = (command or "").strip()
+        if not cleaned:
+            return
+        self.run_async(lambda: self.submit_command(cleaned, display_user=cleaned))
+
+    def toggle_continuous_listening(self, enabled: bool) -> bool:
+        if not enabled:
+            self.stt.stop_continuous_listener()
+            self.continuous_enabled = False
+            self._set_listen_state_visual("idle", 0.0)
+            self.append_log_line("VOICE", "Escucha continua desactivada.")
+            return True
+        ok = self.stt.start_continuous_listener(
+            on_command=self._on_continuous_command,
+            on_state=self._on_continuous_state,
+            on_wakeword=self._on_continuous_wakeword,
+            wake_word=self.continuous_wake_word,
+            sensitivity=self.continuous_sensitivity,
+            post_activation_window=self.continuous_post_window,
+        )
+        self.continuous_enabled = bool(ok)
+        if ok:
+            self._set_listen_state_visual("wait_wakeword", 0.0)
+            self.append_log_line("VOICE", "Escucha continua activa (esperando wakeword).")
+        else:
+            self.append_assistant_bubble("No pude activar escucha continua. Revisa el micrófono.")
+        return ok
 
     def resolve_approval(self, req_id: str, choice: str, *, trust: bool) -> None:
         self._approval_results[req_id] = {"choice": choice, "trust": trust}
@@ -424,6 +492,30 @@ def _make_eda_ctk_ui_class():
                 self.log_box.configure(state="disabled")
             except Exception:
                 pass
+
+        def render_youtube_candidates(self, candidates: list[dict[str, Any]]) -> None:
+            for w in self.yt_candidates_frame.winfo_children():
+                w.destroy()
+            for i, cand in enumerate(candidates[:5]):
+                row = ctk.CTkFrame(self.yt_candidates_frame, fg_color="#0a0a0a", border_width=1, border_color=BORDER)
+                row.pack(fill="x", padx=4, pady=3)
+                title = str(cand.get("title", "video")).strip()
+                channel = str(cand.get("channel", "canal")).strip()
+                thumb = str(cand.get("thumbnail", "")).strip()
+                url = str(cand.get("url", "")).strip()
+                ctk.CTkLabel(
+                    row,
+                    text=f"{i+1}) {title}\nCanal: {channel}\nThumb: {thumb[:80]}",
+                    text_color=TEXT,
+                    justify="left",
+                    wraplength=220,
+                ).pack(side="left", padx=6, pady=5, fill="x", expand=True)
+                ctk.CTkButton(
+                    row,
+                    text="Abrir",
+                    width=56,
+                    command=lambda idx=i + 1: self.submit_command(str(idx), display_user=f"Abrir YouTube #{idx}"),
+                ).pack(side="right", padx=6)
     
         def apply_metrics(self, cpu: float, used_gb: float, total_gb: float, mem_ratio: float) -> None:
             self.cpu_label.configure(text=f"CPU {cpu:.0f}%")
@@ -518,6 +610,22 @@ def _make_eda_ctk_ui_class():
                 font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             )
             self.send_btn.pack(side="left")
+
+            self.continuous_var = tk.BooleanVar(value=False)
+            self.listen_state_label = ctk.CTkLabel(
+                input_row,
+                text="● OFF",
+                text_color=MUTED,
+                width=88,
+                font=ctk.CTkFont(family="Consolas", size=11, weight="bold"),
+            )
+            self.listen_state_label.pack(side="left", padx=(8, 4))
+            ctk.CTkSwitch(
+                input_row,
+                text="Escucha continua",
+                variable=self.continuous_var,
+                command=lambda: self.toggle_continuous_listening(bool(self.continuous_var.get())),
+            ).pack(side="left", padx=(2, 0))
     
             ctk.CTkLabel(
                 right,
@@ -537,6 +645,51 @@ def _make_eda_ctk_ui_class():
             self.ram_bar = ctk.CTkProgressBar(right, height=4, progress_color=HEALTH, fg_color="#111111")
             self.ram_bar.pack(fill="x", padx=14, pady=(2, 14))
             self.ram_bar.set(0.0)
+
+            ctk.CTkLabel(
+                right,
+                text="SETTINGS > YOUTUBE",
+                text_color=MUTED,
+                font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+            ).pack(anchor="w", padx=14, pady=(6, 4))
+            self.yt_auto_open_var = tk.BooleanVar(value=bool(getattr(self.orchestrator, "set_youtube_auto_open", None) and os.getenv("YOUTUBE_AUTO_OPEN", "false").lower() in {"1", "true", "yes", "on"}))
+
+            def _toggle_yt_auto_open() -> None:
+                self.orchestrator.set_youtube_auto_open(bool(self.yt_auto_open_var.get()))
+                self.append_log_line("YOUTUBE", f"Auto-open {'ON' if self.yt_auto_open_var.get() else 'OFF'}")
+
+            ctk.CTkCheckBox(
+                right,
+                text="Auto-open top result",
+                variable=self.yt_auto_open_var,
+                command=_toggle_yt_auto_open,
+            ).pack(anchor="w", padx=14, pady=(0, 8))
+
+            ctk.CTkLabel(
+                right,
+                text="SETTINGS > VOZ",
+                text_color=MUTED,
+                font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+            ).pack(anchor="w", padx=14, pady=(6, 4))
+            self.wake_word_var = tk.StringVar(value=self.continuous_wake_word)
+            ctk.CTkEntry(right, textvariable=self.wake_word_var, width=120, placeholder_text="wake word").pack(
+                anchor="w", padx=14, pady=(0, 4)
+            )
+            self.post_window_var = tk.DoubleVar(value=self.continuous_post_window)
+            ctk.CTkEntry(right, textvariable=self.post_window_var, width=120, placeholder_text="post window s").pack(
+                anchor="w", padx=14, pady=(0, 6)
+            )
+
+            def _apply_voice_settings() -> None:
+                self.continuous_wake_word = (self.wake_word_var.get() or "eda").strip() or "eda"
+                try:
+                    self.continuous_post_window = max(2.0, min(12.0, float(self.post_window_var.get())))
+                except Exception:
+                    self.continuous_post_window = 5.0
+
+            ctk.CTkButton(right, text="Aplicar voz", width=120, command=_apply_voice_settings).pack(
+                anchor="w", padx=14, pady=(0, 8)
+            )
     
             ctk.CTkLabel(
                 right,
@@ -582,6 +735,21 @@ def _make_eda_ctk_ui_class():
                 activate_scrollbars=False,
             )
             self.log_box.pack(fill="both", expand=False, padx=14, pady=(0, 14))
+
+            ctk.CTkLabel(
+                right,
+                text="YOUTUBE RESULTADOS",
+                text_color=MUTED,
+                font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+            ).pack(anchor="w", padx=14, pady=(8, 6))
+            self.yt_candidates_frame = ctk.CTkScrollableFrame(
+                right,
+                fg_color="#080808",
+                border_width=1,
+                border_color=BORDER,
+                height=180,
+            )
+            self.yt_candidates_frame.pack(fill="x", padx=14, pady=(0, 12))
     
         def _quick_btn(self, parent: Any, row: int, col: int, text: str, command_text: str, *, highlight: bool = False) -> Any:
             btn = ctk.CTkButton(
@@ -655,6 +823,16 @@ def _make_eda_ctk_ui_class():
                 self.run_async(ui_done)
     
             self._executor.submit(worker)
+
+        def _set_listen_state_visual(self, state: str, confidence: float) -> None:
+            palette = {
+                "idle": ("● OFF", MUTED),
+                "wait_wakeword": ("● WAKE", "#f6c343"),
+                "post_activation": ("● ESCUCHANDO", HEALTH),
+                "processing": ("● PROCESS", ACCENT),
+            }
+            label, color = palette.get(state, ("● OFF", MUTED))
+            self.listen_state_label.configure(text=f"{label} {confidence:.2f}", text_color=color)
     
         def open_approval_modal(self, req_id: str, summary: str, risk: str, command_preview: str) -> None:
             win = ctk.CTkToplevel(self)
@@ -744,6 +922,25 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
         self.log_box.insert("end", "\n".join(self._recent_logs))
         self.log_box.configure(state="disabled")
 
+    def render_youtube_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        for w in self.yt_candidates_frame.winfo_children():
+            w.destroy()
+        for i, cand in enumerate(candidates[:5]):
+            row = tk.Frame(self.yt_candidates_frame, bg="#0a0a0a", highlightbackground=BORDER, highlightthickness=1)
+            row.pack(fill="x", padx=4, pady=3)
+            title = str(cand.get("title", "video")).strip()
+            channel = str(cand.get("channel", "canal")).strip()
+            thumb = str(cand.get("thumbnail", "")).strip()
+            tk.Label(
+                row,
+                text=f"{i+1}) {title}\nCanal: {channel}\nThumb: {thumb[:70]}",
+                bg="#0a0a0a",
+                fg=TEXT,
+                justify="left",
+                wraplength=220,
+            ).pack(side="left", padx=6, pady=4, fill="x", expand=True)
+            tk.Button(row, text="Abrir", command=lambda idx=i + 1: self.submit_command(str(idx), display_user=f"Abrir YouTube #{idx}")).pack(side="right", padx=6)
+
     def apply_metrics(self, cpu: float, used_gb: float, total_gb: float, mem_ratio: float) -> None:
         self.cpu_label.configure(text=f"CPU {cpu:.0f}%")
         self.cpu_bar["value"] = min(max(cpu, 0.0), 100.0)
@@ -789,6 +986,19 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
         )
         self.send_btn.pack(side="left")
 
+        self.continuous_var = tk.BooleanVar(value=False)
+        self.listen_state_label = tk.Label(input_row, text="● OFF", fg=MUTED, bg=BG, font=("Consolas", 10, "bold"))
+        self.listen_state_label.pack(side="left", padx=(8, 4))
+        tk.Checkbutton(
+            input_row,
+            text="Escucha continua",
+            variable=self.continuous_var,
+            command=lambda: self.toggle_continuous_listening(bool(self.continuous_var.get())),
+            bg=BG,
+            fg=TEXT,
+            selectcolor="#222",
+        ).pack(side="left")
+
         tk.Label(right, text="RECURSOS", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(12, 6))
         self.cpu_label = tk.Label(right, text="CPU 0%", fg=ACCENT, bg=PANEL, font=("Consolas", 11))
         self.cpu_label.pack(anchor="w", padx=10)
@@ -799,6 +1009,38 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
         self.ram_label.pack(anchor="w", padx=10)
         self.ram_bar = ttk.Progressbar(right, maximum=100, length=260)
         self.ram_bar.pack(fill="x", padx=10, pady=(0, 12))
+
+        tk.Label(right, text="SETTINGS > YOUTUBE", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(4, 4))
+        self.yt_auto_open_var = tk.BooleanVar(value=os.getenv("YOUTUBE_AUTO_OPEN", "false").lower() in {"1", "true", "yes", "on"})
+
+        def _toggle_yt_auto_open() -> None:
+            self.orchestrator.set_youtube_auto_open(bool(self.yt_auto_open_var.get()))
+            self.append_log_line("YOUTUBE", f"Auto-open {'ON' if self.yt_auto_open_var.get() else 'OFF'}")
+
+        tk.Checkbutton(
+            right,
+            text="Auto-open top result",
+            variable=self.yt_auto_open_var,
+            command=_toggle_yt_auto_open,
+            bg=PANEL,
+            fg=TEXT,
+            selectcolor="#222222",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        tk.Label(right, text="SETTINGS > VOZ", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(4, 4))
+        self.wake_word_var = tk.StringVar(value=self.continuous_wake_word)
+        tk.Entry(right, textvariable=self.wake_word_var, bg="#0a0a0a", fg=TEXT, insertbackground=TEXT).pack(anchor="w", padx=10, pady=(0, 4))
+        self.post_window_var = tk.StringVar(value=str(self.continuous_post_window))
+        tk.Entry(right, textvariable=self.post_window_var, bg="#0a0a0a", fg=TEXT, insertbackground=TEXT).pack(anchor="w", padx=10, pady=(0, 6))
+
+        def _apply_voice_settings() -> None:
+            self.continuous_wake_word = (self.wake_word_var.get() or "eda").strip() or "eda"
+            try:
+                self.continuous_post_window = max(2.0, min(12.0, float(self.post_window_var.get())))
+            except Exception:
+                self.continuous_post_window = 5.0
+
+        tk.Button(right, text="Aplicar voz", command=_apply_voice_settings, bg="#121212", fg=TEXT).pack(anchor="w", padx=10, pady=(0, 8))
 
         qf = tk.Frame(right, bg=PANEL)
         qf.pack(fill="x", padx=10)
@@ -819,6 +1061,10 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
         tk.Label(right, text="ÚLTIMOS LOGS", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
         self.log_box = tk.Text(right, height=10, bg="#080808", fg=MUTED, font=("Consolas", 10), state="disabled")
         self.log_box.pack(fill="both", expand=False, padx=10, pady=(0, 12))
+
+        tk.Label(right, text="YOUTUBE RESULTADOS", fg=MUTED, bg=PANEL, font=("Consolas", 11, "bold")).pack(anchor="w", padx=10, pady=(2, 4))
+        self.yt_candidates_frame = tk.Frame(right, bg="#080808", highlightbackground=BORDER, highlightthickness=1)
+        self.yt_candidates_frame.pack(fill="x", padx=10, pady=(0, 12))
 
     def _tk_quick(self, parent: tk.Frame, r: int, c: int, label: str, cmd: str, *, highlight: bool = False) -> tk.Button:
         btn = tk.Button(
@@ -857,6 +1103,16 @@ class EDAObsidianUITk(EDABaseUI, tk.Tk):
 
     def _on_mic(self) -> None:
         self.listen_mic()
+
+    def _set_listen_state_visual(self, state: str, confidence: float) -> None:
+        palette = {
+            "idle": ("● OFF", MUTED),
+            "wait_wakeword": ("● WAKE", "#f6c343"),
+            "post_activation": ("● ESCUCHANDO", HEALTH),
+            "processing": ("● PROCESS", ACCENT),
+        }
+        label, color = palette.get(state, ("● OFF", MUTED))
+        self.listen_state_label.configure(text=f"{label} {confidence:.2f}", fg=color)
 
     def open_approval_modal(self, req_id: str, summary: str, risk: str, command_preview: str) -> None:
         win = tk.Toplevel(self)

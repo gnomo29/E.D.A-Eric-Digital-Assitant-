@@ -119,11 +119,16 @@ def main() -> int:
             "ui": "src/ui_main.py",
         },
     }
-    out = ROOT / "logs" / "cleanup_audit_report.json"
+    out = ROOT / "data" / "logs" / "cleanup_audit_report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_import_map_csv(ROOT / "logs" / "import_map.csv")
-    print(json.dumps({"report": str(out.relative_to(ROOT)), "import_map_csv": "logs/import_map.csv"}, ensure_ascii=False))
+    write_import_map_csv(ROOT / "data" / "logs" / "import_map.csv")
+    print(
+        json.dumps(
+            {"report": str(out.relative_to(ROOT)), "import_map_csv": "data/logs/import_map.csv"},
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

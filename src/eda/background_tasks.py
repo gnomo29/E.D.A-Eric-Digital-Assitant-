@@ -7,7 +7,7 @@ import time
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 from . import config
 from .logger import get_logger
@@ -21,13 +21,18 @@ except Exception:
 
 
 class BackgroundReminderWorker:
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        on_due: Callable[[dict[str, str]], None] | None = None,
+    ) -> None:
         self.db_path = db_path or (config.DATA_DIR / "reminders.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._items: List[Dict[str, str | float]] = []
         self._lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
+        self._on_due = on_due
         self._toaster = ToastNotifier() if ToastNotifier is not None else None
         self._init_db()
         self._restore_from_db()
@@ -71,7 +76,7 @@ class BackgroundReminderWorker:
     def stop(self) -> None:
         self._running = False
 
-    def add_reminder(self, message: str, due_ts: float) -> None:
+    def add_reminder(self, message: str, due_ts: float) -> int:
         conn = self._connect()
         try:
             cur = conn.execute("INSERT INTO reminders(message, due_ts) VALUES (?, ?)", (message[:300], float(due_ts)))
@@ -81,6 +86,23 @@ class BackgroundReminderWorker:
             conn.close()
         with self._lock:
             self._items.append({"id": reminder_id, "message": message[:300], "due_ts": float(due_ts)})
+        return reminder_id
+
+    def add_existing(self, reminder_payload: Dict[str, str]) -> bool:
+        """Restaura recordatorio persistido si no está vencido."""
+        try:
+            message = str(reminder_payload.get("message", "")).strip() or "tienes un recordatorio pendiente."
+            scheduled_for = str(reminder_payload.get("scheduled_for", "")).strip()
+            if not scheduled_for:
+                return False
+            due_dt = datetime.strptime(scheduled_for, "%Y-%m-%d %H:%M:%S")
+            due_ts = float(due_dt.timestamp())
+            if due_ts <= time.time():
+                return False
+            self.add_reminder(message, due_ts)
+            return True
+        except Exception:
+            return False
 
     def list_reminders(self) -> List[Dict[str, str]]:
         with self._lock:
@@ -106,6 +128,16 @@ class BackgroundReminderWorker:
             before = len(self._items)
             self._items = [x for x in self._items if int(x.get("id", -1)) != rid]
             return len(self._items) < before
+
+    def clear_all(self) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM reminders")
+            conn.commit()
+        finally:
+            conn.close()
+        with self._lock:
+            self._items = []
 
     def _loop(self) -> None:
         while self._running:
@@ -134,6 +166,16 @@ class BackgroundReminderWorker:
 
     def _notify(self, message: str) -> None:
         title = f"E.D.A. • {datetime.now().strftime('%H:%M')}"
+        if self._on_due is not None:
+            try:
+                self._on_due(
+                    {
+                        "message": message,
+                        "scheduled_for": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
+            except Exception as exc:
+                log.warning("Error callback recordatorio: %s", exc)
         if self._toaster is not None:
             try:
                 self._toaster.show_toast(title, message, threaded=True, duration=6)

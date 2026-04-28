@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import webbrowser
+import signal
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote_plus, unquote
 from urllib.request import Request, urlopen
@@ -19,6 +20,7 @@ from .logger import get_logger
 from .utils import detect_platform
 from .utils.security import sanitize_app_target, sanitize_user_input
 from .undo_manager import UndoManager
+from .audit_log import audit_event
 
 log = get_logger("actions")
 
@@ -26,6 +28,21 @@ try:
     import pygetwindow as gw
 except Exception:
     gw = None
+
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+if os.name == "nt":
+    try:
+        import win32con
+        import win32gui
+        import win32process
+    except Exception:
+        win32con = None
+        win32gui = None
+        win32process = None
 
 try:
     import screen_brightness_control as sbc
@@ -168,6 +185,18 @@ class ActionController:
         r"\b(?:busca|buscar|búscame|buscame|pon|ponme)\s+(.+?)\s+en\s+youtube\b",
         flags=re.IGNORECASE,
     )
+    FORBIDDEN_DISPLAY_COMMANDS = (
+        "xrandr",
+        "nircmd",
+        "setdisplayconfig",
+        "changedisplaysettings",
+        "displayswitch",
+        "monitor",
+        "refresh rate",
+        "resolucion",
+        "resolución",
+        "gpu",
+    )
     SPOTIFY_COMMAND_REGEX = re.compile(
         r"\b(?:reproduce|pon|ponme|busca|buscar|búscame|buscame)\s+(.+?)\s+en\s+spotify\b",
         flags=re.IGNORECASE,
@@ -289,6 +318,13 @@ class ActionController:
                 return f"http://{cleaned}"
             return f"https://{cleaned}"
         return ""
+
+    @classmethod
+    def _contains_forbidden_display_command(cls, text: str) -> bool:
+        low = (text or "").strip().lower()
+        if not low:
+            return False
+        return any(token in low for token in cls.FORBIDDEN_DISPLAY_COMMANDS)
 
     def activate_app_window(self, app_name: str) -> Dict[str, str]:
         """Intenta activar una ventana existente de la aplicación indicada."""
@@ -555,20 +591,134 @@ class ActionController:
             return {"status": "error", "message": f"No pude abrir {normalized}: {exc}"}
 
     def close_app(self, process_name: str) -> Dict[str, str]:
-        """Cierra procesos por nombre, con confirmación."""
-        normalized = self._normalize_app(process_name)
-        if not self._confirm(f"¿Confirma cerrar {normalized}?"):
-            return {"status": "cancel", "message": "Operación cancelada."}
+        """Cierra procesos por nombre (graceful por defecto)."""
+        return self.close_app_robust(process_name, force=False)
 
+    def close_app_robust(self, process_name: str, force: bool = False) -> Dict[str, str]:
+        """
+        Cierre robusto con verificación post-acción.
+        - graceful: WM_CLOSE/terminate/SIGTERM
+        - force: taskkill /F / SIGKILL
+        """
+        if psutil is None:
+            return {"status": "error", "message": "psutil no disponible para cierre fiable de procesos."}
+        normalized = self._normalize_app(process_name).strip().lower().removesuffix(".exe")
+        if not normalized:
+            return {"status": "error", "message": "Necesito el nombre de la aplicación a cerrar."}
+        candidates = self._find_processes_by_app_name(normalized)
+        if not candidates:
+            return {"status": "error", "message": f"No encontré procesos activos para '{normalized}'."}
+        attempts = 0
+        methods_used: List[str] = []
+        pids = [p.pid for p in candidates]
+        for _ in range(2):
+            attempts += 1
+            for proc in list(candidates):
+                method = self._close_single_process(proc, normalized, force=force)
+                methods_used.append(method)
+            time.sleep(0.7)
+            candidates = [p for p in candidates if p.is_running() and not self._is_zombie(p)]
+            if not candidates:
+                break
+        # Último fallback forzado si no salió en modo graceful.
+        if candidates and not force:
+            for proc in list(candidates):
+                method = self._close_single_process(proc, normalized, force=True)
+                methods_used.append(method)
+            time.sleep(0.7)
+            candidates = [p for p in candidates if p.is_running() and not self._is_zombie(p)]
+        ok = not candidates
+        result_msg = (
+            f"Cerré '{normalized}' correctamente (pids={pids})."
+            if ok
+            else f"No pude cerrar completamente '{normalized}'. PIDs aún activos: {[p.pid for p in candidates]}"
+        )
+        audit_event(
+            "close_app",
+            app=normalized,
+            requested_force=bool(force),
+            methods=",".join(methods_used[:12]),
+            pids=pids,
+            attempts=attempts,
+            success=ok,
+            remaining=[p.pid for p in candidates],
+        )
+        return {"status": "ok" if ok else "error", "message": result_msg}
+
+    @staticmethod
+    def _is_zombie(proc: "psutil.Process") -> bool:
         try:
-            if self.platform.startswith("win"):
-                subprocess.run(f"taskkill /IM {normalized}.exe /F", shell=True, check=False)
-                subprocess.run(f"taskkill /IM {normalized} /F", shell=True, check=False)
-            else:
-                subprocess.run(["pkill", "-f", normalized], check=False)
-            return {"status": "ok", "message": f"Intenté cerrar {normalized}."}
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
+            return proc.status() == psutil.STATUS_ZOMBIE
+        except Exception:
+            return False
+
+    def _find_processes_by_app_name(self, app_name: str) -> List["psutil.Process"]:
+        assert psutil is not None
+        hits: List["psutil.Process"] = []
+        current_pid = os.getpid()
+        aliases = {app_name}
+        for k, v in self.APP_ALIASES.items():
+            if v == app_name:
+                aliases.add(k.lower())
+        aliases = {a.removesuffix(".exe") for a in aliases if a}
+        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+            try:
+                if int(proc.pid) == int(current_pid):
+                    continue
+                name = (proc.info.get("name") or "").lower().removesuffix(".exe")
+                exe = os.path.basename((proc.info.get("exe") or "")).lower().removesuffix(".exe")
+                cmdline = proc.info.get("cmdline") or []
+                cmd_bins = {
+                    os.path.basename(str(part)).lower().removesuffix(".exe")
+                    for part in cmdline
+                    if str(part).strip()
+                }
+                if any(alias and (alias == name or alias == exe or alias in cmd_bins) for alias in aliases):
+                    hits.append(proc)
+            except Exception:
+                continue
+        return hits
+
+    def _close_single_process(self, proc: "psutil.Process", app_name: str, force: bool = False) -> str:
+        assert psutil is not None
+        if not proc.is_running():
+            return "already_stopped"
+        if self.platform.startswith("win"):
+            if force:
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/F"], check=False, capture_output=True)
+                return "taskkill_force"
+            # graceful Windows: WM_CLOSE a ventanas del PID; luego terminate.
+            used_wm_close = False
+            if win32gui is not None and win32process is not None and win32con is not None:
+                def _enum_handler(hwnd: int, _param: object) -> None:
+                    nonlocal used_wm_close
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        if pid == proc.pid and win32gui.IsWindowVisible(hwnd):
+                            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                            used_wm_close = True
+                    except Exception:
+                        pass
+                try:
+                    win32gui.EnumWindows(_enum_handler, None)
+                except Exception:
+                    pass
+            time.sleep(0.4)
+            if proc.is_running():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            return "wm_close_then_terminate" if used_wm_close else "terminate"
+        # Linux/macOS
+        try:
+            if force:
+                proc.kill()
+                return "sigkill"
+            proc.send_signal(signal.SIGTERM)
+            return "sigterm"
+        except Exception:
+            return "signal_failed"
 
     def shutdown(self, *, preconfirmed: bool = False) -> Dict[str, str]:
         """Apagado seguro del sistema (confirmado)."""
@@ -713,22 +863,17 @@ class ActionController:
         command, query = self.parse_navigation_command(text)
         if not command:
             return None
+        if self._contains_forbidden_display_command(text):
+            return {"status": "error", "message": "Bloqueado por seguridad: no se permiten cambios de video/GPU."}
         if len(query) < 2:
             return {"status": "ok", "message": "Necesito un término de búsqueda más específico, señor."}
 
         try:
             if command == "youtube_first":
-                first_video_url = self._extract_first_youtube_video_url(query)
-                target_url = first_video_url or self._youtube_search_url(query)
+                # Regla de oro: solo abrir búsqueda/URL segura en navegador; jamás tocar parámetros de hardware.
+                target_url = self._youtube_search_url(query)
                 webbrowser.open(target_url)
-                if first_video_url:
-                    return {"status": "ok", "message": f"Abriendo el primer video encontrado en YouTube sobre {query}."}
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"No pude confirmar el primer video automáticamente, pero abrí YouTube con la búsqueda de {query}."
-                    ),
-                }
+                return {"status": "ok", "message": f"Abrí YouTube con resultados para {query}."}
 
             if command == "spotify_search":
                 url = self._spotify_track_query_url(query)

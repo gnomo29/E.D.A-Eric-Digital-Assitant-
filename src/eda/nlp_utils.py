@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -103,6 +104,15 @@ def detect_secondary_action(text: str) -> tuple[str, str]:
 def normalize_text(text: str) -> str:
     """Normaliza texto para análisis ligero."""
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def normalize_confirmation_text(text: str) -> str:
+    """Normaliza confirmaciones: minúsculas, sin acentos y sin puntuación."""
+    raw = (text or "").strip().lower()
+    decomposed = unicodedata.normalize("NFKD", raw)
+    no_accents = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    clean = re.sub(r"[^\w\s]", " ", no_accents)
+    return re.sub(r"\s+", " ", clean).strip()
 
 
 def normalize_learned_trigger_key(text: str) -> str:
@@ -211,12 +221,47 @@ def parse_command(text: str) -> ParsedCommand:
 
 def detect_confirmation(text: str) -> Optional[bool]:
     """Detecta confirmaciones explícitas del usuario."""
-    t = normalize_text(text)
-    yes_words = ["sí", "si", "confirmo", "acepto", "ok", "adelante"]
-    no_words = ["no", "cancela", "detener", "alto"]
-
-    if any(word in t for word in yes_words):
+    mode = detect_confirmation_mode(text)
+    if mode in {"yes", "force"}:
         return True
-    if any(word in t for word in no_words):
+    if mode == "no":
         return False
     return None
+
+
+def detect_confirmation_mode(text: str) -> str:
+    """
+    Devuelve modo de confirmación: yes | no | force | none.
+    Se usa para respuestas cortas de UI/STT como 'si', 's', 'no', 'forzar'.
+    """
+    t = normalize_confirmation_text(text)
+    if not t:
+        return "none"
+    yes_words = {
+        "si",
+        "s",
+        "confirmo",
+        "acepto",
+        "ok",
+        "dale",
+        "vamos",
+        "procede",
+        "confirmar",
+        "adelante",
+    }
+    no_words = {"no", "n", "nop", "cancelar", "nope", "detener", "stop", "cancela", "alto"}
+    force_words = {"forzar", "forzar cierre", "forcer", "kill", "force", "si forzar", "si forzar cierre"}
+    if t in force_words or t.startswith("forzar "):
+        return "force"
+    if t in yes_words:
+        return "yes"
+    if t in no_words:
+        return "no"
+    # Fallback tolerante para frases mayores.
+    if any(token in t for token in ("forzar", "force", "kill")):
+        return "force"
+    if any(token in t.split() for token in ("si", "confirmo", "acepto", "procede")):
+        return "yes"
+    if any(token in t.split() for token in ("no", "cancelar", "detener", "stop")):
+        return "no"
+    return "none"

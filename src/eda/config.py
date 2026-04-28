@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# Rutas base (layout profesional con src/, data/, temp/, config/)
+# Rutas base (layout simplificado con src/, data/, config/)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = PROJECT_ROOT
 
@@ -40,7 +40,7 @@ _OLLAMA_PORT = _env_str("EDA_OLLAMA_PORT", _env_str("OLLAMA_PORT", "11434"))
 _OLLAMA_BASE = f"http://{_OLLAMA_HOST}:{_OLLAMA_PORT}"
 SRC_DIR = PROJECT_ROOT / "src"
 DATA_DIR = PROJECT_ROOT / "data"
-TEMP_DIR = PROJECT_ROOT / "temp"
+TEMP_DIR = DATA_DIR / "temp"
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 MEMORY_DIR = DATA_DIR / "memory"
@@ -173,13 +173,19 @@ EDA_SPOTIFY_CONF_AUTO = _env_float("EDA_SPOTIFY_CONF_AUTO", 0.82)
 EDA_SPOTIFY_CONF_AMBIG_LOW = _env_float("EDA_SPOTIFY_CONF_AMBIG_LOW", 0.50)
 EDA_SPOTIFY_CACHE_TTL_SECONDS = _env_int("EDA_SPOTIFY_CACHE_TTL_SECONDS", 900)
 EDA_SPOTIFY_TRANSFER_REQUIRES_CONFIRM = _env_bool("EDA_SPOTIFY_TRANSFER_REQUIRES_CONFIRM", True)
-EDA_SPOTIFY_AUDIT_JSONL = BASE_DIR / "logs" / "spotify_actions.jsonl"
+EDA_SPOTIFY_AUDIT_JSONL = LOGS_DIR / "spotify_actions.jsonl"
 EDA_COMMAND_CONFIDENCE_THRESHOLD = _env_float("EDA_COMMAND_CONFIDENCE_THRESHOLD", 0.78)
 EDA_RELEASE_OLLAMA_MEMORY = _env_bool("EDA_RELEASE_OLLAMA_MEMORY", True)
 TRIGGERS_ALLOW_RUN_SCRIPTS = _env_bool("TRIGGERS_ALLOW_RUN_SCRIPTS", False)
 TRIGGERS_FUZZY_THRESHOLD = _env_float("TRIGGERS_FUZZY_THRESHOLD", 80.0)
-TRIGGERS_RATE_LIMIT_PER_MIN = _env_int("TRIGGERS_RATE_LIMIT_PER_MIN", 3)
 YT_DOMAIN_WHITELIST = [d.strip().lower() for d in _env_str("YT_DOMAIN_WHITELIST", "youtube.com,youtu.be").split(",") if d.strip()]
+YOUTUBE_API_KEY = _env_str("YOUTUBE_API_KEY", "")
+YOUTUBE_AUTO_OPEN = _env_bool("YOUTUBE_AUTO_OPEN", False)
+YT_AUTO_OPEN_CONF = _env_float("YT_AUTO_OPEN_CONF", 0.95)
+YT_CACHE_TTL = _env_int("YT_CACHE_TTL", 900)
+YT_REQUIRE_CONFIRM = _env_bool("YT_REQUIRE_CONFIRM", True)
+# Opción avanzada (apagada por defecto): evitar memes conocidos en auto-open.
+YT_AUTO_SKIP_KNOWN_MEMES = _env_bool("YT_AUTO_SKIP_KNOWN_MEMES", False)
 
 # Otros
 DEFAULT_TIMEOUT = 25
@@ -224,7 +230,6 @@ TELEGRAM_WEBHOOK_USE_NGROK = False
 
 # Seguridad remoto Telegram
 REMOTE_ACL_FILE = CONFIG_DIR / "remote_acl.json"
-REMOTE_RATE_LIMIT_PER_MINUTE = 5
 REMOTE_OTP_TTL_SECONDS = 120
 
 # Revocación de skills firmadas

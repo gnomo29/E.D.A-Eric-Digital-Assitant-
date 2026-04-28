@@ -35,6 +35,19 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets*.json
+credentials*.json
+token*.json
+
+# Llaves locales del proyecto (generadas en runtime)
+config/keys/
+!config/keys/.gitkeep
 
 # Config local de herramientas (no forma parte del producto)
 .continue/
@@ -42,8 +55,15 @@ Thumbs.db
 .abacus.donotdelete
 
 # Datastores runtime (no versionar estados locales)
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 data/memory/*.sqlite3
 data/logs/*.jsonl
 logs/*.log
 backups/
+tmp_scene.py
+data/temp/
 

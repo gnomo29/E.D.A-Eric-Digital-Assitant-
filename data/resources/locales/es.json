@@ -1,0 +1,8 @@
+{
+  "security.approval_required": "Aprobación PRO requerida",
+  "security.confirm_yes_no": "¿Confirmas ejecución? (Sí/No)",
+  "security.blocked": "Acción bloqueada por seguridad.",
+  "files.organize.pending": "Tengo una organización pendiente. Responde 'sí' para ejecutar o 'no' para cancelar.",
+  "vision.error_capture": "No pude capturar pantalla.",
+  "telemetry.ram_high": "RAM alta detectada; cerrando procesos secundarios."
+}

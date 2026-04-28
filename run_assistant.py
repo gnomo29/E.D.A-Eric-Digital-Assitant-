@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
     load_env_dotfile = None  # type: ignore[assignment]
 REQ_FILE = ROOT / "requirements.txt"
 VOICE_REQ_FILE = ROOT / "requirements-voice.txt"
-LOG_DIR = ROOT / "logs"
+LOG_DIR = ROOT / "data" / "logs"
 INSTALLER_LOG = LOG_DIR / "installer.log"
 OPTIONAL_PACKAGES = {"pyaudio"}
 
@@ -117,7 +117,7 @@ def _is_pkg_installed(pkg: str) -> bool:
 
 def _find_local_pyaudio_wheel() -> Path | None:
     py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    wheels_dir = ROOT / "resources" / "wheels"
+    wheels_dir = ROOT / "data" / "resources" / "wheels"
     if not wheels_dir.exists():
         return None
     for wheel in sorted(wheels_dir.glob("*.whl")):

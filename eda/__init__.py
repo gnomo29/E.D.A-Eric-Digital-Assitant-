@@ -1,3 +1,8 @@
-"""Paquete principal de E.D.A. (Eric's Digital Assistant)."""
+"""Compatibilidad: expone `src/eda` como paquete `eda`."""
 
-__all__ = ["config"]
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+_SRC_EDA = _ROOT / "src" / "eda"
+
+__path__ = [str(_SRC_EDA)]

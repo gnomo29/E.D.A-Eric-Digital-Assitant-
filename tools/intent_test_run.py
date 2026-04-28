@@ -239,10 +239,10 @@ def main() -> int:
             ),
         },
     }
-    out = ROOT / "logs" / "intent_test_report.json"
+    out = ROOT / "data" / "logs" / "intent_test_report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    run_log = ROOT / "logs" / "intent_test_run.log"
+    run_log = ROOT / "data" / "logs" / "intent_test_run.log"
     run_log.write_text(
         (
             f"ts={time.strftime('%Y-%m-%dT%H:%M:%S')}\n"

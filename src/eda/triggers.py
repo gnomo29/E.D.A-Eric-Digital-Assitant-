@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import time
 import difflib
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +26,6 @@ def normalize_phrase(text: str) -> str:
 class TriggerStore:
     def __init__(self, db_path: Path | None = None) -> None:
         self.db_path = db_path or config.LONG_TERM_DB_FILE
-        self._recent_exec = deque(maxlen=40)
         self._bootstrap()
 
     def _bootstrap(self) -> None:
@@ -139,19 +136,7 @@ class TriggerStore:
             return float(fuzz.ratio(text, phrase))
         return 100.0 * difflib.SequenceMatcher(a=text, b=phrase).ratio()
 
-    def _rate_limited(self) -> bool:
-        now = time.time()
-        while self._recent_exec and (now - self._recent_exec[0]) > 60:
-            self._recent_exec.popleft()
-        limit = max(1, int(config.TRIGGERS_RATE_LIMIT_PER_MIN))
-        if len(self._recent_exec) >= limit:
-            return True
-        self._recent_exec.append(now)
-        return False
-
     def match(self, text: str) -> dict[str, Any] | None:
-        if self._rate_limited():
-            return {"rate_limited": True}
         normalized = normalize_phrase(text)
         if not normalized:
             return None
