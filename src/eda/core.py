@@ -330,6 +330,19 @@ class EDACore:
             return next(iter(available))
         return self.model
 
+    def _tool_catalog_for_prompt(self) -> str:
+        """Catálogo explícito de capacidades para reducir alucinaciones del LLM."""
+        capabilities: list[str] = [
+            "Spotify (reproducir álbum/playlist/canción, liked songs, shuffle/repeat, dispositivo)",
+            "YouTube (abrir URL válida, buscar videos y ofrecer opciones 1/2/3)",
+            "Triggers/macros (crear/listar/ejecutar disparadores con confirmación)",
+            "Memoria persistente (perfil de usuario y recuerdos en largo plazo)",
+            "Sistema (abrir/cerrar apps, volumen, brillo, PDF básico, estado CPU/RAM)",
+            "Web e investigación (búsqueda, noticias y síntesis técnica)",
+            "Seguridad operativa (confirmaciones para acciones riesgosas)",
+        ]
+        return " | ".join(capabilities)
+
     def build_prompt(
         self,
         message: str,
@@ -346,6 +359,11 @@ class EDACore:
                 "sin inventar datos y priorizando pasos ejecutables."
             ),
             "Política: no rechaces preguntas benignas sobre capacidades del asistente.",
+            f"Catálogo de herramientas disponibles: {self._tool_catalog_for_prompt()}",
+            (
+                "Identidad y memoria: tienes acceso a perfil persistente del usuario y memoria de largo plazo; "
+                "consulta esa memoria antes de responder que no conoces un dato personal."
+            ),
         ]
         profile_ctx = ""
         get_profile_summary = getattr(self.memory, "get_profile_summary_for_prompt", None)
