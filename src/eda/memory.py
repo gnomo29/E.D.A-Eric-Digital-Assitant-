@@ -76,6 +76,7 @@ DEFAULT_MEMORY: Dict[str, Any] = {
     "knowledge_order": [],
     "user_preferences": {},
     "session_context": {},
+    "project_contexts": {},
 }
 
 
@@ -242,6 +243,11 @@ class MemoryManager:
             ctx_chunks = [f"{k}={v}" for k, v in list(context.items())[:3]]
             if ctx_chunks:
                 chunks.append("contexto=" + ",".join(ctx_chunks))
+        project_ctx = self.get_project_context()
+        if project_ctx:
+            p_chunks = [f"{k}={v}" for k, v in list(project_ctx.items())[:3]]
+            if p_chunks:
+                chunks.append("proyecto=" + ",".join(p_chunks))
         return " | ".join(chunks)
 
     def get_user_preferences(self) -> Dict[str, str]:
@@ -337,6 +343,41 @@ class MemoryManager:
                 if val and self.set_temporary_context("preferencia_temporal", val, ttl_minutes=180):
                     updated["preferencia_temporal"] = val
         return updated
+
+    def _project_key(self, project_id: str = "") -> str:
+        pid = (project_id or "").strip()
+        if pid:
+            return self._normalize_text(pid).replace(" ", "_")[:64] or "default"
+        return "default"
+
+    def set_project_context(self, key: str, value: str, project_id: str = "") -> bool:
+        k = self._normalize_text(key).replace(" ", "_")[:48]
+        v = str(value or "").strip()[:220]
+        if not k or not v:
+            return False
+        pkey = self._project_key(project_id)
+        data = self.get_memory()
+        projects = data.get("project_contexts", {})
+        if not isinstance(projects, dict):
+            projects = {}
+        payload = projects.get(pkey, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        payload[k] = v
+        projects[pkey] = payload
+        data["project_contexts"] = projects
+        return self.save_memory(data)
+
+    def get_project_context(self, project_id: str = "") -> Dict[str, str]:
+        pkey = self._project_key(project_id)
+        data = self.get_memory()
+        projects = data.get("project_contexts", {})
+        if not isinstance(projects, dict):
+            return {}
+        payload = projects.get(pkey, {})
+        if not isinstance(payload, dict):
+            return {}
+        return {str(k): str(v) for k, v in payload.items() if str(v).strip()}
 
     def remember_identity_answer(self, query: str) -> str:
         low = (query or "").strip().lower()
@@ -484,6 +525,8 @@ class MemoryManager:
             normalized["user_preferences"] = {}
         if not isinstance(normalized.get("session_context"), dict):
             normalized["session_context"] = {}
+        if not isinstance(normalized.get("project_contexts"), dict):
+            normalized["project_contexts"] = {}
         if not isinstance(normalized.get("objectives"), list):
             normalized["objectives"] = []
         if not isinstance(normalized.get("objective_history"), list):

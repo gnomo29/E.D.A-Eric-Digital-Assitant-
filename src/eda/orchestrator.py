@@ -112,6 +112,7 @@ class CommandOrchestrator:
         self._conversation_cache: dict[str, tuple[str, float]] = {}
         self._conversation_cache_ttl_sec = 180.0
         self._policy_mode = "normal"
+        self._last_action_summary: dict[str, str] | None = None
         self._bootstrap_remote_mode()
 
     def close(self) -> None:
@@ -249,6 +250,23 @@ class CommandOrchestrator:
         return "normal"
 
     @staticmethod
+    def _offline_mode_enabled() -> bool:
+        return bool(getattr(config, "EDA_OFFLINE_MODE", False))
+
+    def _remember_last_action(self, source: str, answer: str) -> None:
+        self._last_action_summary = {
+            "source": str(source or "unknown"),
+            "answer": str(answer or "").strip()[:220],
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _offline_block_message(self) -> str:
+        return (
+            "Modo offline total activo: no ejecutaré búsquedas web ni integraciones remotas. "
+            "Si desea desactivarlo, cambie EDA_OFFLINE_MODE=0."
+        )
+
+    @staticmethod
     def _extract_video_search_query(text: str) -> str:
         low = (text or "").strip().lower()
         m = re.search(r"(?:abre|busca|search)\s+(?:videos?|video)\s+(?:de|sobre)?\s*(.+)$", low)
@@ -317,6 +335,43 @@ class CommandOrchestrator:
         if not clean:
             return OrchestrationResult(True, "", "empty")
         low = clean.lower()
+
+        if re.match(r"^\s*(?:que hiciste|qué hiciste|ultima accion|última acción|ultima accion realizada)\b", low):
+            if not self._last_action_summary:
+                return OrchestrationResult(True, "Aún no he ejecutado una acción operativa en esta sesión.", "last_action_empty")
+            s = self._last_action_summary
+            return OrchestrationResult(
+                True,
+                (
+                    f"Última acción ({s.get('source')}): {s.get('answer')}\n"
+                    "Si aplica, puede usar: 'deshaz lo último'."
+                ),
+                "last_action_summary",
+            )
+
+        if re.match(r"^\s*(?:guardar|setear|configurar)\s+contexto\s+proyecto\b", low):
+            m = re.search(r"contexto\s+proyecto\s+([a-z0-9_ áéíóúñ-]{2,40})\s*(?:=|:)\s*(.+)$", low, flags=re.IGNORECASE)
+            if not m:
+                return OrchestrationResult(
+                    True,
+                    "Formato: guardar contexto proyecto <clave> = <valor>.",
+                    "project_context_set_help",
+                )
+            key = m.group(1).strip()
+            val = m.group(2).strip(" .,:;")
+            setter = getattr(self.memory, "set_project_context", None)
+            ok = bool(setter(key, val)) if callable(setter) else False
+            if not ok:
+                return OrchestrationResult(True, "No pude guardar el contexto de proyecto.", "project_context_set_error")
+            return OrchestrationResult(True, f"Contexto de proyecto guardado: {key}.", "project_context_set")
+
+        if re.match(r"^\s*(?:mostrar|ver|listar)\s+contexto\s+proyecto\b", low):
+            getter = getattr(self.memory, "get_project_context", None)
+            rows = getter() if callable(getter) else {}
+            if not rows:
+                return OrchestrationResult(True, "No hay contexto de proyecto guardado.", "project_context_empty")
+            lines = [f"- {k}: {v}" for k, v in list(rows.items())[:20]]
+            return OrchestrationResult(True, "Contexto de proyecto:\n" + "\n".join(lines), "project_context_list")
 
         force_close_match = re.match(r"^\s*(?:forzar|force|kill)\s+(?:cerrar|cierra|close)\s+(.+)$", low)
         if force_close_match:
@@ -687,6 +742,8 @@ class CommandOrchestrator:
             )
 
         yt_intent = classify_youtube_intent(clean)
+        if self._offline_mode_enabled() and yt_intent:
+            return OrchestrationResult(True, self._offline_block_message(), "offline_block")
         if yt_intent and not re.match(r"^\s*(abre|abrir|open)\s+", low):
             yt_answer, yt_source, yt_payload = self._route_play_youtube(clean, yt_intent)
             if yt_answer:
@@ -959,6 +1016,8 @@ class CommandOrchestrator:
             )
         video_q = self._extract_video_search_query(clean)
         if video_q:
+            if self._offline_mode_enabled():
+                return OrchestrationResult(True, self._offline_block_message(), "offline_block")
             if self.web_solver is not None:
                 solved = self.web_solver.solve(f"videos {video_q}", auto_save_code=False)
                 out = solved.get("answer", f"Top-5 resultados de video para {video_q}.")
@@ -973,6 +1032,8 @@ class CommandOrchestrator:
 
         news_lang, news_topic = self._extract_news_query(clean)
         if news_lang or "noticias" in clean.lower():
+            if self._offline_mode_enabled():
+                return OrchestrationResult(True, self._offline_block_message(), "offline_block")
             prompt = f"noticias {news_topic}".strip()
             if news_lang:
                 prompt = f"{prompt} en {news_lang}"
@@ -1079,7 +1140,15 @@ class CommandOrchestrator:
             except Exception as exc:
                 result = {"status": "error", "message": str(exc)}
             if result.get("status") == "ok":
-                return OrchestrationResult(True, result.get("message", "Aplicación abierta."), "open_app")
+                msg = result.get("message", "Aplicación abierta.")
+                self._remember_last_action("open_app", msg)
+                return OrchestrationResult(True, msg, "open_app")
+            if self._offline_mode_enabled():
+                return OrchestrationResult(
+                    True,
+                    f"No encontré app local para {target} y el modo offline bloquea fallback web.",
+                    "open_app_offline_no_fallback",
+                )
             web_candidate = self.actions._resolve_web_target_url(target)
             if web_candidate:
                 web_result = self.actions.open_website(web_candidate)
@@ -1142,7 +1211,9 @@ class CommandOrchestrator:
             target = re.sub(r"\b(forzar|force|kill)\b", "", target, flags=re.IGNORECASE).strip()
             if force_now:
                 result = self.actions.close_app_robust(target, force=True)
-                return OrchestrationResult(True, result.get("message", f"Forcé cierre de {target}."), "close_app_forced")
+                msg = result.get("message", f"Forcé cierre de {target}.")
+                self._remember_last_action("close_app_forced", msg)
+                return OrchestrationResult(True, msg, "close_app_forced")
             if any(k in target.lower() for k in ("chrome", "edge", "firefox", "brave")):
                 self._pending_confirmation = {
                     "kind": "close_app",
@@ -1157,15 +1228,23 @@ class CommandOrchestrator:
                     "close_app_confirm_required",
                 )
             result = self.actions.close_app_robust(target, force=False)
-            return OrchestrationResult(True, result.get("message", "Intenté cerrar la aplicación."), "close_app")
+            msg = result.get("message", "Intenté cerrar la aplicación.")
+            self._remember_last_action("close_app", msg)
+            return OrchestrationResult(True, msg, "close_app")
 
         if intent == "volume":
-            return OrchestrationResult(True, self._handle_volume(clean), "volume")
+            msg = self._handle_volume(clean)
+            self._remember_last_action("volume", msg)
+            return OrchestrationResult(True, msg, "volume")
 
         if intent == "brightness":
-            return OrchestrationResult(True, self._handle_brightness(clean), "brightness")
+            msg = self._handle_brightness(clean)
+            self._remember_last_action("brightness", msg)
+            return OrchestrationResult(True, msg, "brightness")
 
         if intent in {"search_web", "search_request", "arduino_help"} and self.web_solver is not None:
+            if self._offline_mode_enabled():
+                return OrchestrationResult(True, self._offline_block_message(), "offline_block")
             if remote_llm.remote_search_mode_requested() and not remote_llm.is_remote_fully_configured():
                 return OrchestrationResult(True, remote_llm.RemoteUnavailableMsg, "remote_search_misconfigured")
             if remote_llm.remote_search_mode_requested() and remote_llm.is_remote_fully_configured():

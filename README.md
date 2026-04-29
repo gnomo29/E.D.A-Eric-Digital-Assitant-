@@ -179,6 +179,16 @@ En CI o máquinas sin pantalla puedes usar `python src/ui_main.py --no-gui` (sal
 - Activa/desactiva voz desde el check de respuesta hablada.
 - Usa el botón de micrófono para escucha por frase o continua.
 - Ajusta permisos y configuración desde el panel lateral.
+- Comandos nuevos:
+  - `que hiciste` (resume la última acción operativa y sugiere deshacer).
+  - `guardar contexto proyecto <clave> = <valor>`
+  - `mostrar contexto proyecto`
+  - `deshaz lo último`
+
+### Modo offline total
+
+- Si defines `EDA_OFFLINE_MODE=1`, E.D.A. bloquea búsquedas web e integraciones remotas para operar en modo local.
+- Útil para entornos sin red o sesiones con máxima privacidad.
 
 ### Ejemplos de uso reales
 

@@ -233,6 +233,30 @@ class IntentRoutingIntegrationTests(unittest.TestCase):
         result = orch.orchestrate("guardar contexto sesion = modo trabajo")
         self.assertEqual("context_set", result.source)
 
+    @patch("eda.orchestrator.config.EDA_OFFLINE_MODE", True)
+    def test_offline_blocks_web_search(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("busca noticias de tecnologia")
+        self.assertEqual("offline_block", result.source)
+        self.assertIn("offline", result.answer.lower())
+
+    def test_last_action_summary(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.actions.close_app_robust = MagicMock(return_value={"message": "cerrado"})
+        _ = orch.orchestrate("cierra notepad")
+        result = orch.orchestrate("que hiciste")
+        self.assertEqual("last_action_summary", result.source)
+        self.assertIn("última acción", result.answer.lower())
+
+    def test_project_context_commands(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.set_project_context = MagicMock(return_value=True)
+        orch.memory.get_project_context = MagicMock(return_value={"stack": "python"})
+        saved = orch.orchestrate("guardar contexto proyecto stack = python")
+        self.assertEqual("project_context_set", saved.source)
+        listed = orch.orchestrate("mostrar contexto proyecto")
+        self.assertEqual("project_context_list", listed.source)
+
     def test_dry_run_preview(self) -> None:
         orch, _actions, _ag, _core, _ws = self._build_orchestrator()
         result = orch.orchestrate("simula borra carpeta temp")
