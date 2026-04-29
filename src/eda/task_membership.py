@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -57,7 +58,7 @@ class TaskMembershipStore:
         return conn
 
     def _bootstrap(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS learned_tasks (
@@ -145,7 +146,7 @@ class TaskMembershipStore:
         ctx_payload = json.dumps(context or {}, ensure_ascii=False)
         plan_payload = json.dumps(plan or {"steps": steps}, ensure_ascii=False)
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     """
                     INSERT INTO learned_tasks(name, trigger, steps_json, source, created_at, updated_at, variables_json, context_json, plan_json)
@@ -171,7 +172,7 @@ class TaskMembershipStore:
         if not normalized_text:
             return None
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     "SELECT name, trigger, steps_json, source, use_count, updated_at, variables_json, context_json "
                     "FROM learned_tasks ORDER BY LENGTH(trigger) DESC"
@@ -214,7 +215,7 @@ class TaskMembershipStore:
         if not norm_trigger:
             return
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     "UPDATE learned_tasks SET use_count = use_count + 1, updated_at=? WHERE trigger=?",
                     (datetime.now().isoformat(timespec="seconds"), norm_trigger),
@@ -224,7 +225,7 @@ class TaskMembershipStore:
 
     def log_execution(self, payload: ExecutionLog) -> None:
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     """
                     INSERT INTO execution_logs(
@@ -259,7 +260,7 @@ class TaskMembershipStore:
             return
         now = datetime.now().isoformat(timespec="seconds")
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 conn.execute(
                     """
                     INSERT INTO generalized_skills(pattern_key, skill_name, intent, template_json, use_count, success_count, last_error, updated_at)
@@ -294,7 +295,7 @@ class TaskMembershipStore:
         if not normalized:
             return None
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn:
                 rows = conn.execute(
                     """
                     SELECT pattern_key, skill_name, intent, template_json, use_count, success_count, last_error

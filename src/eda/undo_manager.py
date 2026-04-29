@@ -16,7 +16,10 @@ class UndoManager:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=3.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _init_db(self) -> None:
         conn = self._connect()

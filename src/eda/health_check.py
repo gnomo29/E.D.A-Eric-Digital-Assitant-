@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import time
+import threading
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Dict
@@ -11,6 +13,11 @@ import requests
 
 from . import config
 from . import remote_llm
+
+_CACHE_LOCK = threading.Lock()
+_CACHE_TTL_SEC = 30.0
+_CACHE_AT = 0.0
+_CACHE_VALUE: Dict[str, str] = {}
 
 
 def _check_module(module_name: str) -> bool:
@@ -47,7 +54,13 @@ def _writable_dir(path: Path) -> str:
         return f"error:{exc.__class__.__name__}"
 
 
-def run_health_check() -> Dict[str, str]:
+def run_health_check(force: bool = False) -> Dict[str, str]:
+    global _CACHE_AT, _CACHE_VALUE
+    now = time.time()
+    with _CACHE_LOCK:
+        if not force and _CACHE_VALUE and (now - _CACHE_AT) <= _CACHE_TTL_SEC:
+            return dict(_CACHE_VALUE)
+
     checks: Dict[str, str] = {}
 
     required_modules = [
@@ -103,6 +116,9 @@ def run_health_check() -> Dict[str, str]:
         checks["spotify_web"] = f"error:{exc.__class__.__name__}"
 
     checks["dir:.cache"] = _writable_dir(Path(config.BASE_DIR) / ".cache")
+    with _CACHE_LOCK:
+        _CACHE_VALUE = dict(checks)
+        _CACHE_AT = time.time()
     return checks
 
 

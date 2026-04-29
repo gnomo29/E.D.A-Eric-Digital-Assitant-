@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import sys
 from typing import Optional
 
 from .logger import get_logger
@@ -14,6 +15,11 @@ try:
     import pyttsx3
 except Exception:
     pyttsx3 = None
+
+try:
+    import pythoncom  # type: ignore
+except Exception:
+    pythoncom = None  # type: ignore
 
 
 class TTSManager:
@@ -40,6 +46,7 @@ class TTSManager:
         self._queue_lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
         self._available = pyttsx3 is not None
+        self._shutting_down = False
 
         self._start_worker()
 
@@ -62,7 +69,7 @@ class TTSManager:
         except Exception as exc:
             log.error("No pude iniciar TTS: %s", exc)
             self._engine = None
-            self._available = False
+            self._available = pyttsx3 is not None
             return False
 
     def _select_voice(self, engine) -> None:
@@ -79,6 +86,11 @@ class TTSManager:
 
     def _start_worker(self) -> None:
         def runner() -> None:
+            if sys.platform.startswith("win") and pythoncom is not None:
+                try:
+                    pythoncom.CoInitialize()
+                except Exception:
+                    pass
             while True:
                 item = self._queue.get()
                 if not item:
@@ -90,6 +102,11 @@ class TTSManager:
                     break
                 self._speak_now(text)
                 self._queue.task_done()
+            if sys.platform.startswith("win") and pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
         self._worker = threading.Thread(target=runner, daemon=True)
         self._worker.start()
@@ -132,6 +149,8 @@ class TTSManager:
         self._enqueue(text.strip(), priority=1)
 
     def _enqueue(self, text: str, priority: int) -> None:
+        if self._shutting_down:
+            return
         with self._queue_lock:
             items: list[tuple[int, str]] = []
             while not self._queue.empty():
@@ -151,16 +170,22 @@ class TTSManager:
                 self._queue.put(item)
 
     def stop(self) -> None:
-        if self._engine is not None:
-            try:
-                self._engine.stop()
-            except Exception:
-                pass
+        with self._lock:
+            if self._engine is not None:
+                try:
+                    self._engine.stop()
+                except Exception:
+                    pass
 
     def shutdown(self) -> None:
+        self._shutting_down = True
         self.stop()
         self.clear_queue()
         self._queue.put((0, "__STOP__"))
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=1.5)
+        self._worker = None
 
     def clear_queue(self) -> None:
         with self._queue_lock:
@@ -182,4 +207,5 @@ class TTSManager:
                 self._engine.runAndWait()
         except Exception as exc:
             log.warning("Error en TTS, reiniciando engine: %s", exc)
-            self._engine = None
+            with self._lock:
+                self._engine = None

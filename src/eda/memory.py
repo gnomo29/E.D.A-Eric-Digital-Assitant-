@@ -6,11 +6,14 @@ import re
 import sqlite3
 import threading
 import time
+import shutil
+import zipfile
 import unicodedata
 import base64
 import hashlib
 import math
 import json
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -71,6 +74,8 @@ DEFAULT_MEMORY: Dict[str, Any] = {
     "reminders": [],
     "knowledge_base": {},
     "knowledge_order": [],
+    "user_preferences": {},
+    "session_context": {},
 }
 
 
@@ -120,7 +125,7 @@ class MemoryManager:
 
     def _bootstrap_long_term_db(self) -> None:
         self.long_term_db_file.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.long_term_db_file) as conn:
+        with closing(sqlite3.connect(self.long_term_db_file)) as conn:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()]
             if cols and not {"tag", "text", "created_at", "metadata_json"}.issubset(set(cols)):
                 try:
@@ -227,7 +232,111 @@ class MemoryManager:
             val = str(facts.get(key, "")).strip()
             if val:
                 chunks.append(f"{key}={val}")
+        prefs = self.get_user_preferences()
+        if prefs:
+            pref_chunks = [f"{k}={v}" for k, v in list(prefs.items())[:4]]
+            if pref_chunks:
+                chunks.append("preferencias=" + ",".join(pref_chunks))
+        context = self.get_active_context()
+        if context:
+            ctx_chunks = [f"{k}={v}" for k, v in list(context.items())[:3]]
+            if ctx_chunks:
+                chunks.append("contexto=" + ",".join(ctx_chunks))
         return " | ".join(chunks)
+
+    def get_user_preferences(self) -> Dict[str, str]:
+        data = self.get_memory()
+        prefs = data.get("user_preferences", {})
+        if not isinstance(prefs, dict):
+            return {}
+        return {str(k): str(v) for k, v in prefs.items() if str(v).strip()}
+
+    def set_user_preference(self, key: str, value: str) -> bool:
+        k = self._normalize_text(key).replace(" ", "_")[:48]
+        v = str(value or "").strip()[:160]
+        if not k or not v:
+            return False
+        data = self.get_memory()
+        prefs = data.get("user_preferences", {})
+        if not isinstance(prefs, dict):
+            prefs = {}
+        prefs[k] = v
+        data["user_preferences"] = prefs
+        return self.save_memory(data)
+
+    def set_temporary_context(self, key: str, value: str, ttl_minutes: int = 120) -> bool:
+        k = self._normalize_text(key).replace(" ", "_")[:48]
+        v = str(value or "").strip()[:200]
+        if not k or not v:
+            return False
+        expires = datetime.now() + timedelta(minutes=max(5, int(ttl_minutes)))
+        data = self.get_memory()
+        ctx = data.get("session_context", {})
+        if not isinstance(ctx, dict):
+            ctx = {}
+        ctx[k] = {"value": v, "expires_at": expires.isoformat(timespec="seconds")}
+        data["session_context"] = ctx
+        return self.save_memory(data)
+
+    def get_active_context(self) -> Dict[str, str]:
+        data = self.get_memory()
+        ctx = data.get("session_context", {})
+        if not isinstance(ctx, dict):
+            return {}
+        now = datetime.now()
+        active: Dict[str, str] = {}
+        changed = False
+        for k, item in list(ctx.items()):
+            if not isinstance(item, dict):
+                ctx.pop(k, None)
+                changed = True
+                continue
+            exp = str(item.get("expires_at", "")).strip()
+            val = str(item.get("value", "")).strip()
+            if not exp or not val:
+                ctx.pop(k, None)
+                changed = True
+                continue
+            try:
+                if datetime.fromisoformat(exp) < now:
+                    ctx.pop(k, None)
+                    changed = True
+                    continue
+            except Exception:
+                ctx.pop(k, None)
+                changed = True
+                continue
+            active[str(k)] = val
+        if changed:
+            data["session_context"] = ctx
+            self.save_memory(data)
+        return active
+
+    def update_preferences_from_text(self, text: str) -> Dict[str, str]:
+        low = self._normalize_text(text)
+        updated: Dict[str, str] = {}
+        if not low:
+            return updated
+
+        pref_patterns = [
+            (r"\bprefiero\s+(.+)$", "preferencia_general"),
+            (r"\bme gusta\s+(.+)$", "gusto_general"),
+            (r"\bsiempre\s+responde\s+(.+)$", "estilo_respuesta"),
+        ]
+        for pat, key in pref_patterns:
+            m = re.search(pat, low)
+            if m:
+                val = m.group(1).strip(" .,:;!?")
+                if val and self.set_user_preference(key, val):
+                    updated[key] = val
+
+        if any(tok in low for tok in ("por ahora", "hoy ", "en esta sesion", "en esta sesión")):
+            m_ctx = re.search(r"\b(?:por ahora|hoy|en esta sesion|en esta sesión)\s+(.+)$", low)
+            if m_ctx:
+                val = m_ctx.group(1).strip(" .,:;!?")
+                if val and self.set_temporary_context("preferencia_temporal", val, ttl_minutes=180):
+                    updated["preferencia_temporal"] = val
+        return updated
 
     def remember_identity_answer(self, query: str) -> str:
         low = (query or "").strip().lower()
@@ -243,7 +352,7 @@ class MemoryManager:
         if not text_clean:
             return
         with self._long_term_lock:
-            with sqlite3.connect(self.long_term_db_file) as conn:
+            with closing(sqlite3.connect(self.long_term_db_file)) as conn:
                 conn.execute(
                     "INSERT INTO memories(tag,text,created_at,metadata_json) VALUES(?,?,?,?)",
                     (
@@ -273,7 +382,7 @@ class MemoryManager:
         params.append(str(max(1, int(k))))
         out: list[dict[str, Any]] = []
         with self._long_term_lock:
-            with sqlite3.connect(self.long_term_db_file) as conn:
+            with closing(sqlite3.connect(self.long_term_db_file)) as conn:
                 rows = conn.execute(sql, params).fetchall()
         for row_id, tag, text, created_at, metadata_json in rows:
             try:
@@ -371,6 +480,10 @@ class MemoryManager:
         for key in ("learned_commands", "learned_skills", "habits", "remembered", "knowledge_base"):
             if not isinstance(normalized.get(key), dict):
                 normalized[key] = {}
+        if not isinstance(normalized.get("user_preferences"), dict):
+            normalized["user_preferences"] = {}
+        if not isinstance(normalized.get("session_context"), dict):
+            normalized["session_context"] = {}
         if not isinstance(normalized.get("objectives"), list):
             normalized["objectives"] = []
         if not isinstance(normalized.get("objective_history"), list):
@@ -416,6 +529,98 @@ class MemoryManager:
                 self._memory_cache_loaded_at = time.time()
             return saved
 
+    def create_memory_snapshot(self, label: str = "") -> Path | None:
+        backup_dir = config.BACKUPS_DIR / "memory_snapshots"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", (label or "").strip())[:24]
+        suffix = f"_{safe_label}" if safe_label else ""
+        out = backup_dir / f"memory_snapshot_{stamp}{suffix}.zip"
+        tmp = backup_dir / f".tmp_{stamp}"
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            files = [
+                (self.memory_file, "memoria.json"),
+                (self.user_profile_file, "user_profile.json"),
+                (self.long_term_db_file, "long_term.db"),
+            ]
+            for src, name in files:
+                if src.exists():
+                    shutil.copy2(src, tmp / name)
+            if not any((tmp / n).exists() for _s, n in files):
+                return None
+            zip_path = shutil.make_archive(str(out.with_suffix("")), "zip", root_dir=str(tmp))
+            return Path(zip_path)
+        except Exception:
+            return None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def list_memory_snapshots(self, limit: int = 20) -> list[Path]:
+        backup_dir = config.BACKUPS_DIR / "memory_snapshots"
+        if not backup_dir.exists():
+            return []
+        files = sorted(backup_dir.glob("memory_snapshot_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[: max(1, min(int(limit), 200))]
+
+    def restore_memory_snapshot(self, snapshot_file: Path, sections: set[str] | None = None) -> bool:
+        src = Path(snapshot_file)
+        if not src.exists() or src.suffix.lower() != ".zip":
+            return False
+        temp = src.parent / f".restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        temp.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.unpack_archive(str(src), str(temp), "zip")
+            requested = {s.strip().lower() for s in (sections or {"memory", "profile", "db"}) if s}
+            mapping = [
+                ("memory", temp / "memoria.json", self.memory_file),
+                ("profile", temp / "user_profile.json", self.user_profile_file),
+                ("db", temp / "long_term.db", self.long_term_db_file),
+            ]
+            restored = 0
+            for key, origin, target in mapping:
+                if key not in requested:
+                    continue
+                if not origin.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(origin, target)
+                restored += 1
+            if restored == 0:
+                return False
+            self._memory_cache = None
+            self._memory_cache_mtime = None
+            self._memory_cache_loaded_at = 0.0
+            return True
+        except Exception:
+            return False
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
+
+    def compare_memory_snapshots(self, first: Path, second: Path) -> dict[str, Any]:
+        a = Path(first)
+        b = Path(second)
+        if not a.exists() or not b.exists():
+            return {"ok": False, "error": "snapshot_missing"}
+        try:
+            with zipfile.ZipFile(a, "r") as za, zipfile.ZipFile(b, "r") as zb:
+                map_a = {i.filename: (int(i.file_size), int(i.CRC)) for i in za.infolist() if not i.is_dir()}
+                map_b = {i.filename: (int(i.file_size), int(i.CRC)) for i in zb.infolist() if not i.is_dir()}
+            names_a = set(map_a.keys())
+            names_b = set(map_b.keys())
+            added = sorted(list(names_b - names_a))
+            removed = sorted(list(names_a - names_b))
+            changed = sorted([n for n in names_a.intersection(names_b) if map_a.get(n) != map_b.get(n)])
+            return {
+                "ok": True,
+                "added": added,
+                "removed": removed,
+                "changed": changed,
+                "same": not added and not removed and not changed,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _derive_fernet(self) -> Any | None:
         seed = f"{Path.home()}::{config.APP_NAME}::{config.PROJECT_ROOT}".encode("utf-8")
         digest = hashlib.sha256(seed).digest()
@@ -430,7 +635,7 @@ class MemoryManager:
     def _load_memory_payload(self) -> Dict[str, Any]:
         raw = safe_json_load(self.memory_file, {})
         if not isinstance(raw, dict):
-            return {}
+            raw = {}
         encrypted = raw.get("__encrypted__")
         if not encrypted:
             return raw
@@ -443,9 +648,33 @@ class MemoryManager:
             return payload if isinstance(payload, dict) else {}
         except Exception as exc:
             log.warning("[MEMORY] No pude descifrar memoria: %s", exc)
+            # Fallback de recuperación para persistencia robusta: intentar copia .bak
+            bak = self.memory_file.with_suffix(self.memory_file.suffix + ".bak")
+            backup_raw = safe_json_load(bak, {})
+            if isinstance(backup_raw, dict):
+                backup_encrypted = backup_raw.get("__encrypted__")
+                if backup_encrypted:
+                    try:
+                        decrypted = fernet.decrypt(str(backup_encrypted).encode("utf-8")).decode("utf-8")
+                        payload = json.loads(decrypted)
+                        if isinstance(payload, dict):
+                            log.info("[MEMORY] Recuperé memoria desde backup .bak.")
+                            return payload
+                    except Exception:
+                        pass
+                elif backup_raw:
+                    log.info("[MEMORY] Recuperé memoria en claro desde backup .bak.")
+                    return backup_raw
             return {}
 
     def _save_memory_payload(self, data: Dict[str, Any]) -> bool:
+        # Copia de seguridad incremental para recuperación ante cortes/corrupción.
+        bak = self.memory_file.with_suffix(self.memory_file.suffix + ".bak")
+        try:
+            if self.memory_file.exists():
+                shutil.copy2(self.memory_file, bak)
+        except Exception:
+            pass
         fernet = self._derive_fernet()
         try:
             import json
@@ -511,6 +740,54 @@ class MemoryManager:
         if assistant_msg:
             chat_history.append(assistant_msg)
         data["chat_history"] = chat_history[-300:]
+        return self.save_memory(data)
+
+    def persist_interaction(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        intent: str,
+        entity: str,
+        record_behavior: bool = True,
+    ) -> bool:
+        """Persiste interacción y evento en una sola escritura de memoria."""
+        data = self.get_memory()
+        history: List[Dict[str, str]] = data.get("history", [])
+        history.append(
+            {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "user": user_text,
+                "assistant": assistant_text,
+            }
+        )
+        data["history"] = history[-120:]
+
+        chat_history = data.get("chat_history", [])
+        if not isinstance(chat_history, list):
+            chat_history = []
+        user_msg = self._build_chat_message("user", user_text)
+        assistant_msg = self._build_chat_message("assistant", assistant_text)
+        if user_msg:
+            chat_history.append(user_msg)
+        if assistant_msg:
+            chat_history.append(assistant_msg)
+        data["chat_history"] = chat_history[-300:]
+
+        if record_behavior and not self._contains_sensitive_data(user_text):
+            events = data.get("behavior_events", [])
+            if not isinstance(events, list):
+                events = []
+            events.append(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "intent": (intent or "chat")[:48],
+                    "entity": (entity or "")[:120],
+                    "preview": (user_text or "").strip()[:240],
+                }
+            )
+            max_e = max(20, int(getattr(config, "BEHAVIOR_EVENTS_MAX", 250)))
+            data["behavior_events"] = events[-max_e:]
         return self.save_memory(data)
 
     def learn_command(self, trigger: str, action: str, append: bool = True) -> bool:

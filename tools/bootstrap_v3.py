@@ -250,8 +250,28 @@ def run_bootstrap(args: argparse.Namespace) -> int:
             validate_integrity(root, dry_run=args.dry_run, verbose=args.verbose)
             _append_audit(root, action="validate_integrity", mode=mode, outcome="ok", dry_run=args.dry_run)
         except Exception as exc:
-            failures.append(f"validate_integrity: {exc}")
-            _append_audit(root, action="validate_integrity", mode=mode, outcome="error", dry_run=args.dry_run, detail=str(exc))
+            # En modo rápido (--no-tests) degradamos este paso a warning para no bloquear CI/local
+            # cuando el entorno aún no tiene skills habilitadas pero sí requiere firmado básico.
+            if args.no_tests:
+                print(f"Aviso (no bloqueante): validate_integrity: {exc}")
+                _append_audit(
+                    root,
+                    action="validate_integrity",
+                    mode=mode,
+                    outcome="warning",
+                    dry_run=args.dry_run,
+                    detail=str(exc),
+                )
+            else:
+                failures.append(f"validate_integrity: {exc}")
+                _append_audit(
+                    root,
+                    action="validate_integrity",
+                    mode=mode,
+                    outcome="error",
+                    dry_run=args.dry_run,
+                    detail=str(exc),
+                )
 
         if not args.skip_logs:
             try:

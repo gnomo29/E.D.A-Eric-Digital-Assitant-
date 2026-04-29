@@ -139,7 +139,7 @@ def try_completion_single_prompt(full_prompt: str, *, purpose: str = "ask") -> s
     ]
     out = chat_completion(messages, temperature=0.35)
     if out:
-        log.info("[REMOTE_LLM] ok purpose=%s chars=%d", purpose, len(out))
+        log.info("[REMOTE_LLM] ok purpose=%s chars=%s", purpose, len(out))
     return out
 
 

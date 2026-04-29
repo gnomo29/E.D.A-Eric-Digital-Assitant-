@@ -464,6 +464,9 @@ python tools/bootstrap_v3.py --no-tests --telegram-smoke --telegram-token $TOKEN
 python tools/bootstrap_v3.py --dry-run
 ```
 
+Nota operativa:
+- `--no-tests` activa un flujo rápido donde la validación de integridad se reporta como advertencia no bloqueante si el entorno aún está incompleto (por ejemplo, sin skills cargables en esa máquina), manteniendo el proceso útil para CI/local bootstrap.
+
 - **Firmar una skill nueva sin regenerar llaves:**
 ```bash
 python tools/update_skills.py mi_skill.py
