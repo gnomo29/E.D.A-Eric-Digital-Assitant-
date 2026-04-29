@@ -12,7 +12,7 @@ from typing import Any
 from .. import config
 from ..logger import get_logger
 from ..nlp_utils import detect_confirmation
-from ..nlu.spotify_intent import SpotifyParsedIntent, fuzzy_ratio, parse_spotify_utterance, score_candidate
+from ..nlu.spotify_intent import SpotifyParsedIntent, fuzzy_ratio, normalize_for_fuzzy, parse_spotify_utterance, score_candidate
 from ..spotify_web import get_spotify_client, is_web_api_configured
 
 log = get_logger("connectors.spotify")
@@ -21,6 +21,94 @@ _CONF_AUTO = lambda: float(getattr(config, "EDA_SPOTIFY_CONF_AUTO", 0.82))
 _CONF_LOW = lambda: float(getattr(config, "EDA_SPOTIFY_CONF_AMBIG_LOW", 0.50))
 _TTL = lambda: int(getattr(config, "EDA_SPOTIFY_CACHE_TTL_SECONDS", 900))
 _TRANSFER_CONFIRM = lambda: bool(getattr(config, "EDA_SPOTIFY_TRANSFER_REQUIRES_CONFIRM", True))
+
+_ALT_VERSION_MARKERS = (
+    "remix",
+    "live",
+    "cover",
+    "karaoke",
+    "instrumental",
+    "slowed",
+    "reverb",
+    "8d",
+    "sped up",
+    "mashup",
+    "tribute",
+    "edit",
+    "version",
+)
+
+_ALT_VERSION_REQUEST_MARKERS = (
+    "remix",
+    "live",
+    "cover",
+    "acustic",
+    "acoustic",
+    "karaoke",
+    "instrumental",
+    "slowed",
+    "reverb",
+    "mashup",
+    "version",
+    "versión",
+    "tribute",
+)
+
+
+def _norm_text(text: str) -> str:
+    return normalize_for_fuzzy(text or "")
+
+
+def _split_track_and_artist(query: str) -> tuple[str, str]:
+    q = (query or "").strip()
+    m = re.match(r"^\s*(.+?)\s+(?:de|by)\s+(.+?)\s*$", q, flags=re.IGNORECASE)
+    if not m:
+        return q, ""
+    title = m.group(1).strip(" '\"«»")
+    artist = m.group(2).strip(" '\"«»")
+    if len(title) < 2 or len(artist) < 2:
+        return q, ""
+    return title, artist
+
+
+def _query_requests_alt_version(query: str) -> bool:
+    qn = _norm_text(query)
+    if not bool(getattr(config, "EDA_SPOTIFY_PREFER_OFFICIAL", True)):
+        return True
+    return any(marker in qn for marker in _ALT_VERSION_REQUEST_MARKERS)
+
+
+def _track_title_penalty(title: str, *, allow_alt_version: bool) -> float:
+    if allow_alt_version:
+        return 0.0
+    tn = _norm_text(title)
+    penalty = 0.0
+    for marker in _ALT_VERSION_MARKERS:
+        if marker in tn:
+            penalty += 0.10
+    # Penalización extra para resultados de humor/parodia que suelen colarse.
+    if "muppet" in tn:
+        penalty += 0.25
+    return min(0.45, penalty)
+
+
+def _score_track_result(
+    *,
+    query: str,
+    title: str,
+    artists: str,
+    artist_hint: str,
+    allow_alt_version: bool,
+) -> float:
+    sc = score_candidate(query, title, artists)
+    if artist_hint:
+        artist_match = fuzzy_ratio(artist_hint, artists)
+        if artist_match >= 0.70:
+            sc += 0.18
+        elif artist_match < 0.35:
+            sc -= 0.28
+    sc -= _track_title_penalty(title, allow_alt_version=allow_alt_version)
+    return max(0.0, min(1.0, sc))
 
 
 def _audit_path() -> Any:
@@ -247,16 +335,36 @@ def _top_from_search_albums(bridge: SpotifyBridge, q: str) -> list[tuple[dict[st
     return scored
 
 
-def _top_from_search_tracks(bridge: SpotifyBridge, q: str) -> list[tuple[dict[str, Any], float]]:
-    res = bridge.search(q, "track", limit=8)
-    items = ((res.get("tracks") or {}).get("items")) or []
-    scored: list[tuple[dict[str, Any], float]] = []
-    for it in items:
-        name = (it.get("name") or "").strip()
-        artists = it.get("artists") or []
-        sub = ", ".join((a.get("name") or "") for a in artists[:2])
-        sc = score_candidate(q, name, sub)
-        scored.append((it, sc))
+def _top_from_search_tracks(bridge: SpotifyBridge, q: str, artist_hint: str = "") -> list[tuple[dict[str, Any], float]]:
+    queries = [q]
+    if artist_hint:
+        title_hint, _ = _split_track_and_artist(q)
+        if title_hint:
+            queries.insert(0, f'track:"{title_hint}" artist:"{artist_hint}"')
+
+    allow_alt = _query_requests_alt_version(q)
+    by_uri: dict[str, tuple[dict[str, Any], float]] = {}
+    for qq in queries[:2]:
+        res = bridge.search(qq, "track", limit=10)
+        items = ((res.get("tracks") or {}).get("items")) or []
+        for it in items:
+            uri = str(it.get("uri") or "")
+            if not uri:
+                continue
+            name = (it.get("name") or "").strip()
+            artists = it.get("artists") or []
+            sub = ", ".join((a.get("name") or "") for a in artists[:2])
+            sc = _score_track_result(
+                query=q,
+                title=name,
+                artists=sub,
+                artist_hint=artist_hint,
+                allow_alt_version=allow_alt,
+            )
+            cur = by_uri.get(uri)
+            if cur is None or sc > cur[1]:
+                by_uri[uri] = (it, sc)
+    scored = list(by_uri.values())
     scored.sort(key=lambda x: -x[1])
     return scored
 
@@ -449,16 +557,19 @@ def _play_similar(bridge: SpotifyBridge, parsed: SpotifyParsedIntent, q: str, de
 
 
 def _play_track(bridge: SpotifyBridge, parsed: SpotifyParsedIntent, q: str, device_id: str | None) -> str:
-    scored = _top_from_search_tracks(bridge, q)
+    q_clean, artist_hint = _split_track_and_artist(q)
+    if not artist_hint:
+        artist_hint = (parsed.artist_hint or "").strip()
+    scored = _top_from_search_tracks(bridge, q_clean or q, artist_hint=artist_hint)
     if not scored:
         return "No encontré esa canción."
     t, c = scored[0]
     if c < _CONF_LOW():
-        return "No tengo una coincidencia clara; decime artista y título."
+        return "No tengo una coincidencia clara; decime artista y título (por ejemplo: canción X de artista Y)."
     uri = t.get("uri")
     if not uri:
         return "Error al leer el track."
-    append_spotify_audit({"event": "play_track", "q": q, "uri": uri, "score": c})
+    append_spotify_audit({"event": "play_track", "q": q, "artist_hint": artist_hint, "uri": uri, "score": c})
     bridge.start(uris=[str(uri)], device_id=device_id)
     _run_post_play(bridge, parsed, device_id)
     return f"Reproduciendo **{t.get('name') or q}**."
@@ -467,12 +578,15 @@ def _play_track(bridge: SpotifyBridge, parsed: SpotifyParsedIntent, q: str, devi
 def _play_generic(bridge: SpotifyBridge, parsed: SpotifyParsedIntent, q: str, device_id: str | None, orch: Any) -> str:
     if parsed.prefer_saved and "playlist" in (q or "").lower():
         return _play_playlist_or_ask(bridge, parsed, q, device_id, orch)
+    # En peticiones genéricas ("reproduce X") priorizar pista evita abrir álbumes equivocados.
+    tr = _play_track(bridge, parsed, q, device_id)
+    if not tr.startswith("No encontré esa canción"):
+        return tr
     album_ans = _play_album_or_ask(bridge, parsed, q, True, device_id, orch)
     if "varias coincidencias" in album_ans or "No encontré un álbum claro" in album_ans:
         return album_ans
     if album_ans.startswith("Reproduciendo el álbum") or album_ans.startswith("Reproduciendo"):
         return album_ans
-    tr = _play_track(bridge, parsed, q, device_id)
     if "No encontré esa canción" in tr and "No encontré ese álbum" in album_ans:
         return album_ans
     if not tr.startswith("No encontré esa canción"):

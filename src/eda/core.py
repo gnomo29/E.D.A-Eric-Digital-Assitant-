@@ -32,6 +32,7 @@ class EDACore:
         self.tags_endpoint = config.OLLAMA_TAGS_URL
         self.health_endpoint = config.OLLAMA_HEALTH_URL
         self.system_prompt = config.APP_PERSONALITY
+        self.conversation_style = str(getattr(config, "EDA_CONVERSATION_STYLE", "neutral") or "neutral").strip().lower()
         self.web_search = WebSearch()
         self.memory = memory_manager or MemoryManager()
         self.http = build_http_session()
@@ -287,14 +288,14 @@ class EDACore:
             if self.SEARCH_COMMAND_REGEX.search(normalized):
                 return (
                     True,
-                    "Señor, necesito una consulta para buscar. Ejemplo: 'busca recetas de pizza'.",
+                    "Necesito una consulta para buscar. Ejemplo: 'busca recetas de pizza'.",
                 )
             return (False, "")
 
         if len(query) < 2:
             return (
                 True,
-                "Señor, la consulta es demasiado corta. Intente con algo más específico.",
+                "La consulta es demasiado corta. Prueba con algo más específico.",
             )
 
         encoded_query = quote_plus(query)
@@ -305,7 +306,7 @@ class EDACore:
             return (True, f"Buscando {query} en Google")
         except Exception as exc:
             log.error("No pude abrir navegador para búsqueda web: %s", exc)
-            return (True, "Señor, no pude abrir el navegador para realizar la búsqueda.")
+            return (True, "No pude abrir el navegador para realizar la búsqueda.")
 
     def _available_models(self) -> List[str]:
         """Obtiene modelos disponibles en Ollama."""
@@ -391,18 +392,63 @@ class EDACore:
         """Respuestas degradadas cuando Ollama no está disponible."""
         q = message.lower().strip()
         if "hora" in q:
-            return f"Señor, en este momento son las {datetime.now().strftime('%H:%M:%S')}."
+            return f"Ahora mismo son las {datetime.now().strftime('%H:%M:%S')}."
         if "fecha" in q or "día" in q:
-            return f"Señor, hoy es {datetime.now().strftime('%d/%m/%Y')}."
+            return f"Hoy es {datetime.now().strftime('%d/%m/%Y')}."
         if "ayuda" in q or "comandos" in q:
             return (
-                "Señor, estoy en modo degradado por falta de Ollama, "
+                "Estoy en modo degradado porque Ollama no está disponible, "
                 "pero aún puedo abrir/cerrar apps, optimizar el sistema, gestionar Bluetooth e investigar en web."
             )
         return (
-            "Señor, no tengo conexión activa con Ollama en este instante. "
+            "No tengo conexión activa con Ollama en este instante. "
             "Continuaré en modo degradado hasta recuperar el servicio."
         )
+
+    @staticmethod
+    def _clip_brief(text: str) -> str:
+        chunks = re.split(r"(?<=[.!?])\s+", text)
+        if not chunks:
+            return text
+        first = chunks[0].strip()
+        if len(first) > 200:
+            return first[:200].rstrip() + "..."
+        return first
+
+    def set_conversation_style(self, style: str) -> str:
+        allowed = {"formal", "neutral", "cercano", "breve"}
+        chosen = (style or "").strip().lower()
+        if chosen not in allowed:
+            chosen = "neutral"
+        self.conversation_style = chosen
+        return chosen
+
+    def _polish_answer_text(self, message: str, answer: str, source: str) -> str:
+        """Suaviza el tono para conversación diaria sin cambiar el contenido útil."""
+        text = (answer or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"^\s*señor[,:\s]+", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*te explico:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*según mi memoria persistente:\s*", "Recuerdo que ", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*según mi búsqueda en línea[,:\s]*", "", text, flags=re.IGNORECASE)
+        if source.startswith("web_fallback") and text:
+            text = f"Revisé fuentes en línea y encontré esto: {text}"
+        prompt = (message or "").strip().lower()
+        if prompt in {"hola", "buenas", "buenos días", "buenos dias", "buenas tardes", "buenas noches"}:
+            if not any(g in text.lower() for g in ("hola", "buen", "encantado")):
+                text = f"Hola. {text}"
+        style = (self.conversation_style or "neutral").lower()
+        if style == "formal":
+            if not re.match(r"^(entendido|perfecto|de acuerdo)[\.,! ]", text, flags=re.IGNORECASE):
+                text = f"Entendido. {text}"
+        elif style == "cercano":
+            if not re.match(r"^(claro|vale|perfecto|genial)[\.,! ]", text, flags=re.IGNORECASE):
+                text = f"Claro, {text[:1].lower() + text[1:] if text else text}"
+        elif style == "breve":
+            text = self._clip_brief(text)
+        return text
 
     @staticmethod
     def _is_low_memory_condition() -> bool:
@@ -564,7 +610,7 @@ class EDACore:
             except Exception:
                 elapsed_ms = 0.0
             log.info(f"[CORE] ask source={source} elapsed_ms={float(elapsed_ms):.1f}")
-            return answer
+            return self._polish_answer_text(message, answer, source)
 
         handled_search, search_answer = self.try_open_google_search(message)
         if handled_search:
@@ -579,7 +625,7 @@ class EDACore:
             top = memory_hits[0]
             recalled = str(top.get("assistant_text", "")).strip()
             if recalled:
-                return _finish(f"Según mi memoria persistente: {recalled}", "long_term_memory")
+                return _finish(f"Recuerdo que {recalled}", "long_term_memory")
 
         prompt = self.build_prompt(message, history, extra_context=extra_context, response_instruction=response_instruction)
 

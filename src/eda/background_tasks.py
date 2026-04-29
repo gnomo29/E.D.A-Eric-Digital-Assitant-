@@ -38,7 +38,10 @@ class BackgroundReminderWorker:
         self._restore_from_db()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path))
+        conn = sqlite3.connect(str(self.db_path), timeout=3.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -75,6 +78,10 @@ class BackgroundReminderWorker:
 
     def stop(self) -> None:
         self._running = False
+        th = self._thread
+        if th and th.is_alive():
+            th.join(timeout=1.2)
+        self._thread = None
 
     def add_reminder(self, message: str, due_ts: float) -> int:
         conn = self._connect()

@@ -24,6 +24,7 @@ temp/cache/
 # Local memory/state (runtime)
 data/memory/*.json
 !data/memory/*.example.json
+data/memory/*.bak
 
 # OS/editor noise
 .DS_Store

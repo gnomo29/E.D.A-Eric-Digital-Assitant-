@@ -158,6 +158,79 @@ class SpotifyRouterMockedTests(unittest.TestCase):
         self.assertIn("Reproduciendo", out)
         sp.start_playback.assert_called()
 
+    @patch.dict(os.environ, {"EDA_SPOTIFY_CLIENT_ID": "x", "EDA_SPOTIFY_USE_PKCE": "1"}, clear=False)
+    @patch("eda.connectors.spotify.get_spotify_client")
+    @patch("eda.connectors.spotify.is_web_api_configured", return_value=True)
+    def test_track_prefers_original_over_meme_or_remix(self, _cfg: MagicMock, mock_client: MagicMock) -> None:
+        sp = MagicMock()
+        sp.current_user.return_value = {"id": "u1"}
+        sp.devices.return_value = {"devices": [{"id": "d1", "name": "PC", "is_active": True, "type": "Computer"}]}
+        sp.search.return_value = {
+            "tracks": {
+                "items": [
+                    {
+                        "name": "Bohemian Rhapsody - The Muppets Version",
+                        "artists": [{"name": "The Muppets"}],
+                        "uri": "spotify:track:muppets",
+                    },
+                    {
+                        "name": "Bohemian Rhapsody - Remastered 2011",
+                        "artists": [{"name": "Queen"}],
+                        "uri": "spotify:track:queen",
+                    },
+                ]
+            }
+        }
+        mock_client.return_value = sp
+        orch = MagicMock()
+        msg = route_spotify_natural(orch, "reproduce bohimian rhpsodi", "bohimian rhpsodi")
+        self.assertIn("reproduciendo", msg.lower())
+        kwargs = sp.start_playback.call_args.kwargs
+        self.assertEqual(kwargs.get("uris"), ["spotify:track:queen"])
+
+    @patch.dict(os.environ, {"EDA_SPOTIFY_CLIENT_ID": "x", "EDA_SPOTIFY_USE_PKCE": "1"}, clear=False)
+    @patch("eda.connectors.spotify.get_spotify_client")
+    @patch("eda.connectors.spotify.is_web_api_configured", return_value=True)
+    def test_track_with_artist_hint_prefers_matching_artist(self, _cfg: MagicMock, mock_client: MagicMock) -> None:
+        sp = MagicMock()
+        sp.current_user.return_value = {"id": "u1"}
+        sp.devices.return_value = {"devices": [{"id": "d1", "name": "PC", "is_active": True, "type": "Computer"}]}
+        sp.search.side_effect = [
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "name": "In The End",
+                            "artists": [{"name": "Linkin Park"}],
+                            "uri": "spotify:track:lp",
+                        },
+                        {
+                            "name": "In The End (Remix)",
+                            "artists": [{"name": "DJ Random"}],
+                            "uri": "spotify:track:remix",
+                        },
+                    ]
+                }
+            },
+            {
+                "tracks": {
+                    "items": [
+                        {
+                            "name": "In The End (Remix)",
+                            "artists": [{"name": "DJ Random"}],
+                            "uri": "spotify:track:remix",
+                        }
+                    ]
+                }
+            },
+        ]
+        mock_client.return_value = sp
+        orch = MagicMock()
+        msg = route_spotify_natural(orch, "reproduce in th end de linkin park", "in th end de linkin park")
+        self.assertIn("reproduciendo", msg.lower())
+        kwargs = sp.start_playback.call_args.kwargs
+        self.assertEqual(kwargs.get("uris"), ["spotify:track:lp"])
+
     def test_audit_no_token(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, "a.jsonl")

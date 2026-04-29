@@ -175,6 +175,159 @@ class IntentRoutingIntegrationTests(unittest.TestCase):
                 self.assertEqual("create_pdf", result.source)
                 self.assertIn(".pdf", result.answer.lower())
 
+    def test_delete_trigger_requires_id(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("borrar disparador")
+        self.assertEqual("trigger_delete_need_id", result.source)
+        self.assertIn("id", result.answer.lower())
+
+    def test_delete_trigger_by_id(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.triggers.delete_trigger = MagicMock(return_value=True)
+        result = orch.orchestrate("eliminar trigger 7")
+        self.assertEqual("trigger_deleted", result.source)
+        self.assertIn("#7", result.answer)
+        orch.triggers.delete_trigger.assert_called_once_with(7)
+
+    def test_toggle_trigger_by_id(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.triggers.set_active = MagicMock(return_value=True)
+        result = orch.orchestrate("desactivar disparador 3")
+        self.assertEqual("trigger_toggled", result.source)
+        self.assertIn("#3", result.answer)
+        orch.triggers.set_active.assert_called_once_with(3, False)
+
+    def test_toggle_all_triggers(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.triggers.set_active_all = MagicMock(return_value=5)
+        result = orch.orchestrate("desactivar todos los disparadores")
+        self.assertEqual("trigger_toggle_all", result.source)
+        self.assertIn("5", result.answer)
+        orch.triggers.set_active_all.assert_called_once_with(False)
+
+    def test_trigger_history_by_id(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.triggers.list_trigger_runs = MagicMock(
+            return_value=[{"created_at": "2026-04-28T21:00:00", "status": "ok", "source": "auto", "detail": "hecho"}]
+        )
+        result = orch.orchestrate("historial disparador 9")
+        self.assertEqual("trigger_history", result.source)
+        self.assertIn("#9", result.answer)
+
+    def test_preferences_list(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.get_user_preferences = MagicMock(return_value={"voz": "activa"})
+        result = orch.orchestrate("mostrar mis preferencias")
+        self.assertEqual("preferences_list", result.source)
+        self.assertIn("voz", result.answer.lower())
+
+    def test_set_preference(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.set_user_preference = MagicMock(return_value=True)
+        result = orch.orchestrate("guardar preferencia tono = formal")
+        self.assertEqual("preference_set", result.source)
+
+    def test_set_context(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.set_temporary_context = MagicMock(return_value=True)
+        result = orch.orchestrate("guardar contexto sesion = modo trabajo")
+        self.assertEqual("context_set", result.source)
+
+    def test_dry_run_preview(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("simula borra carpeta temp")
+        self.assertEqual("dry_run_preview", result.source)
+        self.assertIn("efectos previstos", result.answer.lower())
+
+    def test_memory_snapshot_commands(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.create_memory_snapshot = MagicMock(return_value=Path("snap.zip"))
+        orch.memory.list_memory_snapshots = MagicMock(return_value=[Path("snap.zip")])
+        orch.memory.restore_memory_snapshot = MagicMock(return_value=True)
+        created = orch.orchestrate("snapshot memoria")
+        self.assertEqual("memory_snapshot_created", created.source)
+        listed = orch.orchestrate("listar snapshots memoria")
+        self.assertEqual("memory_snapshot_list", listed.source)
+        restored = orch.orchestrate("restaurar memoria 1")
+        self.assertEqual("memory_restore_ok", restored.source)
+
+    def test_memory_snapshot_compare_command(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.memory.list_memory_snapshots = MagicMock(return_value=[Path("a.zip"), Path("b.zip")])
+        orch.memory.compare_memory_snapshots = MagicMock(return_value={"ok": True, "same": False, "changed": ["memoria.json"]})
+        result = orch.orchestrate("comparar snapshots memoria 1 2")
+        self.assertEqual("memory_snapshot_compare", result.source)
+        self.assertIn("cambiados", result.answer.lower())
+
+    def test_policy_mode_blocks_risky_action(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        set_mode = orch.orchestrate("modo política noche")
+        self.assertEqual("policy_mode_set", set_mode.source)
+        blocked = orch.orchestrate("borra carpeta temporal")
+        self.assertEqual("policy_blocked_risky_action", blocked.source)
+
+    def test_policy_mode_auto_set(self) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        set_mode = orch.orchestrate("modo política auto")
+        self.assertEqual("policy_mode_set", set_mode.source)
+
+    def test_trigger_action_open_website_and_speak(self) -> None:
+        orch, actions, _ag, _core, _ws = self._build_orchestrator()
+        r1 = orch._execute_trigger_action({"action_type": "open_website", "action_payload": {"url": "https://example.com"}})
+        self.assertIn("abrí", r1.lower())
+        actions.open_website.assert_called()
+        r2 = orch._execute_trigger_action({"action_type": "speak", "action_payload": {"text": "hola"}})
+        self.assertEqual("hola", r2)
+
+    @patch("eda.orchestrator.parse_command")
+    def test_needs_clarification_for_low_conf_command_like_text(self, mock_parse: MagicMock) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        parsed = MagicMock()
+        parsed.intent = "chat"
+        parsed.entity = ""
+        parsed.confidence = 0.21
+        mock_parse.return_value = parsed
+        result = orch.orchestrate("abre")
+        self.assertEqual("needs_clarification", result.source)
+
+    @patch("eda.orchestrator.parse_command")
+    def test_conversation_cache_reuses_previous_answer(self, mock_parse: MagicMock) -> None:
+        orch, _actions, _ag, core, _ws = self._build_orchestrator()
+        parsed = MagicMock()
+        parsed.intent = "chat"
+        parsed.entity = ""
+        parsed.confidence = 0.2
+        mock_parse.return_value = parsed
+        core.ask.return_value = "respuesta cacheable"
+        first = orch.orchestrate("qué es python?")
+        second = orch.orchestrate("qué es python?")
+        self.assertEqual("conversation_llm", first.source)
+        self.assertEqual("conversation_llm_cache", second.source)
+
+    def test_set_conversation_style(self) -> None:
+        orch, _actions, _ag, core, _ws = self._build_orchestrator()
+        core.set_conversation_style = MagicMock(return_value="cercano")
+        result = orch.orchestrate("modo de conversación cercano")
+        self.assertEqual("conversation_style_set", result.source)
+        self.assertIn("cercano", result.answer.lower())
+
+    @patch("eda.orchestrator.run_health_check", return_value={"ollama": "offline", "spotify_web": "ok"})
+    def test_health_diagnostic(self, _hc: MagicMock) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        result = orch.orchestrate("diagnóstico de salud")
+        self.assertEqual("health_diagnostic", result.source)
+        self.assertIn("alertas", result.answer.lower())
+
+    @patch("eda.orchestrator.run_health_check", return_value={"ollama": "ok"})
+    def test_export_health_report(self, _hc: MagicMock) -> None:
+        orch, _actions, _ag, _core, _ws = self._build_orchestrator()
+        orch.triggers.list_triggers = MagicMock(return_value=[])
+        with tempfile.TemporaryDirectory() as td:
+            with patch("eda.orchestrator.config.EXPORTS_DIR", Path(td)):
+                result = orch.orchestrate("exportar diagnóstico")
+        self.assertEqual("health_report_exported", result.source)
+        self.assertIn("diagnóstico exportado", result.answer.lower())
+
     @patch("eda.orchestrator.search_youtube_candidates")
     @patch("eda.orchestrator.validate_youtube_url", return_value=True)
     @patch("eda.orchestrator.webbrowser.open")

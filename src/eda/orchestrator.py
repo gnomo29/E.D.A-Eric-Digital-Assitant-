@@ -35,6 +35,7 @@ from .connectors.mobile import TelegramConnector
 from .security.remote_acl import RemoteACL
 from .security.otp_manager import OTPManager
 from .qa import QAService
+from .health_check import run_health_check
 from skills.document_specialist import create_presentation
 
 log = get_logger("orchestrator")
@@ -108,7 +109,19 @@ class CommandOrchestrator:
         self._bootstrap_audit_log_path = config.LOGS_DIR / "bootstrap_actions.log"
         self._remote_audit_log_path = config.LOGS_DIR / "remote_commands.log"
         self._youtube_log_path = config.LOGS_DIR / "search_history.jsonl"
+        self._conversation_cache: dict[str, tuple[str, float]] = {}
+        self._conversation_cache_ttl_sec = 180.0
+        self._policy_mode = "normal"
         self._bootstrap_remote_mode()
+
+    def close(self) -> None:
+        try:
+            self.reminder_worker.stop()
+        except Exception:
+            pass
+        self._pending_youtube_options = []
+        self._pending_youtube_confirm = None
+        self._conversation_cache.clear()
 
     @staticmethod
     def _split_app_query(entity: str) -> tuple[str, str]:
@@ -193,6 +206,47 @@ class CommandOrchestrator:
             return float(getattr(config, "EDA_COMMAND_CONFIDENCE_THRESHOLD", 0.78))
         except Exception:
             return 0.78
+
+    def _cache_get(self, text: str) -> str | None:
+        key = (text or "").strip().lower()
+        item = self._conversation_cache.get(key)
+        if not item:
+            return None
+        answer, expires_at = item
+        if datetime.now().timestamp() > float(expires_at):
+            self._conversation_cache.pop(key, None)
+            return None
+        return answer
+
+    def _cache_set(self, text: str, answer: str) -> None:
+        key = (text or "").strip().lower()
+        if not key or not answer:
+            return
+        self._conversation_cache[key] = (answer, datetime.now().timestamp() + float(self._conversation_cache_ttl_sec))
+        if len(self._conversation_cache) > 120:
+            # limpieza FIFO simple para no crecer en RAM
+            oldest = next(iter(self._conversation_cache.keys()))
+            self._conversation_cache.pop(oldest, None)
+
+    @staticmethod
+    def _needs_clarification(text: str, intent: str, confidence: float, entity: str) -> bool:
+        low = (text or "").strip().lower()
+        if confidence >= 0.58:
+            return False
+        if intent == "chat" and re.match(r"^\s*(abre|cierra|reproduce|pon|play)\b", low):
+            return True
+        if re.match(r"^\s*(abre|cierra|reproduce|pon|play)\b", low) and len((entity or "").strip()) < 2:
+            return True
+        return False
+
+    def _effective_policy_mode(self) -> str:
+        mode = str(self._policy_mode or "normal").strip().lower()
+        if mode != "auto":
+            return mode
+        hour = datetime.now().hour
+        if hour >= 22 or hour < 7:
+            return "noche"
+        return "normal"
 
     @staticmethod
     def _extract_video_search_query(text: str) -> str:
@@ -376,6 +430,12 @@ class CommandOrchestrator:
                 trig = dict(self._pending_trigger_execute)
                 self._pending_trigger_execute = None
                 result = self._execute_trigger_action(trig)
+                self.triggers.log_trigger_run(
+                    int(trig.get("id", 0)),
+                    status="ok",
+                    detail=result,
+                    source="confirmed",
+                )
                 self._audit_operate_secure(
                     "trigger_executed",
                     f"trigger_id={trig.get('id')}",
@@ -389,7 +449,11 @@ class CommandOrchestrator:
                 )
                 return OrchestrationResult(True, f"Trigger ejecutado — {result}", "trigger_executed_confirmed")
             if decision is False:
+                trig = dict(self._pending_trigger_execute)
                 self._pending_trigger_execute = None
+                trig_id = int(trig.get("id", 0))
+                if trig_id > 0:
+                    self.triggers.log_trigger_run(trig_id, status="cancel", detail="Cancelado por usuario", source="confirmed")
                 return OrchestrationResult(True, "Trigger cancelado.", "trigger_cancelled")
             return OrchestrationResult(True, "Responde Sí o No para ejecutar el trigger.", "trigger_wait")
 
@@ -399,6 +463,216 @@ class CommandOrchestrator:
                 return OrchestrationResult(True, "No tienes disparadores creados.", "trigger_list")
             txt = "\n".join([f"#{r['id']} [{'ON' if r['active'] else 'OFF'}] '{r['phrase']}' -> {r['action_type']}" for r in rows[:20]])
             return OrchestrationResult(True, f"Disparadores:\n{txt}", "trigger_list")
+
+        if re.match(r"^\s*(?:activar|desactivar)\s+todos\s+los\s+(?:triggers?|disparadores?)\b", low):
+            active = low.startswith("activar")
+            changed = self.triggers.set_active_all(active)
+            state = "activados" if active else "desactivados"
+            return OrchestrationResult(True, f"Listo, {changed} disparadores {state}.", "trigger_toggle_all")
+
+        if re.match(r"^\s*(?:activar|desactivar)\s+(?:trigger|disparador|disparadores)\b", low):
+            match = re.search(r"(\d+)", low)
+            if not match:
+                return OrchestrationResult(
+                    True,
+                    "Indícame el ID del disparador. Ejemplo: 'desactivar disparador 12'.",
+                    "trigger_toggle_need_id",
+                )
+            trigger_id = int(match.group(1))
+            active = low.startswith("activar")
+            ok = self.triggers.set_active(trigger_id, active)
+            if not ok:
+                return OrchestrationResult(True, f"No encontré el disparador #{trigger_id}.", "trigger_toggle_not_found")
+            state = "activado" if active else "desactivado"
+            return OrchestrationResult(True, f"Listo, disparador #{trigger_id} {state}.", "trigger_toggled")
+
+        if re.match(r"^\s*(?:borrar|eliminar)\s+(?:trigger|disparador|disparadores)\b", low):
+            match = re.search(r"(\d+)", low)
+            if not match:
+                return OrchestrationResult(
+                    True,
+                    "Para borrar un disparador necesito el ID. Ejemplo: 'borrar disparador 12'.",
+                    "trigger_delete_need_id",
+                )
+            trigger_id = int(match.group(1))
+            ok = self.triggers.delete_trigger(trigger_id)
+            if not ok:
+                return OrchestrationResult(True, f"No encontré el disparador #{trigger_id}.", "trigger_delete_not_found")
+            return OrchestrationResult(True, f"Listo, borré el disparador #{trigger_id}.", "trigger_deleted")
+
+        if re.match(r"^\s*(?:historial|historia)\s+(?:de\s+)?(?:trigger|disparador)\b", low):
+            match = re.search(r"(\d+)", low)
+            if not match:
+                return OrchestrationResult(
+                    True,
+                    "Indícame el ID. Ejemplo: 'historial disparador 12'.",
+                    "trigger_history_need_id",
+                )
+            trigger_id = int(match.group(1))
+            rows = self.triggers.list_trigger_runs(trigger_id, limit=10)
+            if not rows:
+                return OrchestrationResult(True, f"No hay historial para el disparador #{trigger_id}.", "trigger_history_empty")
+            lines = [f"{r['created_at']} | {r['status']} | {r['source']} | {r['detail'][:80]}" for r in rows]
+            return OrchestrationResult(True, f"Historial disparador #{trigger_id}:\n" + "\n".join(lines), "trigger_history")
+
+        if re.match(r"^\s*(?:modo|estilo)\s+(?:de\s+)?conversaci[oó]n\b", low):
+            style_match = re.search(r"\b(formal|neutral|cercano|breve)\b", low)
+            if not style_match:
+                current = str(getattr(self.core, "conversation_style", "neutral"))
+                return OrchestrationResult(
+                    True,
+                    f"Estilo actual: {current}. Opciones: formal, neutral, cercano, breve.",
+                    "conversation_style_help",
+                )
+            setter = getattr(self.core, "set_conversation_style", None)
+            if callable(setter):
+                chosen = setter(style_match.group(1))
+                try:
+                    config.EDA_CONVERSATION_STYLE = chosen
+                except Exception:
+                    pass
+                return OrchestrationResult(True, f"Listo, usaré estilo conversacional {chosen}.", "conversation_style_set")
+            return OrchestrationResult(True, "No pude cambiar el estilo conversacional ahora mismo.", "conversation_style_error")
+
+        if re.match(r"^\s*(?:mostrar|ver|listar)\s+(?:mis\s+)?preferencias\b", low):
+            prefs = self.memory.get_user_preferences()
+            if not prefs:
+                return OrchestrationResult(True, "No hay preferencias guardadas todavía.", "preferences_empty")
+            lines = [f"- {k}: {v}" for k, v in list(prefs.items())[:20]]
+            return OrchestrationResult(True, "Preferencias guardadas:\n" + "\n".join(lines), "preferences_list")
+
+        if re.match(r"^\s*(?:guardar|setear|configurar)\s+preferencia\b", low):
+            m = re.search(r"preferencia\s+([a-z0-9_ áéíóúñ-]{2,40})\s*(?:=|:)\s*(.+)$", low, flags=re.IGNORECASE)
+            if not m:
+                return OrchestrationResult(
+                    True,
+                    "Formato: guardar preferencia <clave> = <valor>.",
+                    "preference_set_help",
+                )
+            key = m.group(1).strip()
+            val = m.group(2).strip(" .,:;")
+            ok = self.memory.set_user_preference(key, val)
+            if not ok:
+                return OrchestrationResult(True, "No pude guardar esa preferencia.", "preference_set_error")
+            return OrchestrationResult(True, f"Listo, guardé la preferencia {key}.", "preference_set")
+
+        if re.match(r"^\s*(?:guardar|setear|configurar)\s+contexto\b", low):
+            m = re.search(r"contexto\s+([a-z0-9_ áéíóúñ-]{2,40})\s*(?:=|:)\s*(.+)$", low, flags=re.IGNORECASE)
+            if not m:
+                return OrchestrationResult(
+                    True,
+                    "Formato: guardar contexto <clave> = <valor>.",
+                    "context_set_help",
+                )
+            key = m.group(1).strip()
+            val = m.group(2).strip(" .,:;")
+            ok = self.memory.set_temporary_context(key, val, ttl_minutes=180)
+            if not ok:
+                return OrchestrationResult(True, "No pude guardar ese contexto temporal.", "context_set_error")
+            return OrchestrationResult(True, f"Contexto temporal guardado: {key}.", "context_set")
+
+        if re.match(r"^\s*(?:snapshot|respaldo)\s+memoria\b", low):
+            snap = self.memory.create_memory_snapshot("manual")
+            if not snap:
+                return OrchestrationResult(True, "No pude crear el snapshot de memoria.", "memory_snapshot_error")
+            return OrchestrationResult(True, f"Snapshot de memoria creado: {snap}", "memory_snapshot_created")
+
+        if re.match(r"^\s*(?:listar|ver)\s+snapshots\s+memoria\b", low):
+            rows = self.memory.list_memory_snapshots(limit=10)
+            if not rows:
+                return OrchestrationResult(True, "No hay snapshots de memoria todavía.", "memory_snapshot_list_empty")
+            lines = [f"{i+1}) {p.name}" for i, p in enumerate(rows)]
+            return OrchestrationResult(True, "Snapshots de memoria:\n" + "\n".join(lines), "memory_snapshot_list")
+
+        if re.match(r"^\s*(?:restaurar|rollback)\s+memoria\b", low):
+            rows = self.memory.list_memory_snapshots(limit=20)
+            if not rows:
+                return OrchestrationResult(True, "No encontré snapshots para restaurar.", "memory_restore_empty")
+            idx_match = re.search(r"(\d+)", low)
+            idx = int(idx_match.group(1)) - 1 if idx_match else 0
+            if idx < 0 or idx >= len(rows):
+                return OrchestrationResult(True, "Índice de snapshot inválido.", "memory_restore_bad_index")
+            section_match = re.search(r"\b(perfil|memoria|db|todo)\b", low)
+            sections = {"memory", "profile", "db"}
+            if section_match:
+                sec = section_match.group(1)
+                if sec == "perfil":
+                    sections = {"profile"}
+                elif sec == "memoria":
+                    sections = {"memory"}
+                elif sec == "db":
+                    sections = {"db"}
+            ok = self.memory.restore_memory_snapshot(rows[idx], sections=sections)
+            if not ok:
+                return OrchestrationResult(True, "No pude restaurar ese snapshot.", "memory_restore_error")
+            return OrchestrationResult(
+                True,
+                f"Memoria restaurada desde {rows[idx].name} ({','.join(sorted(sections))}).",
+                "memory_restore_ok",
+            )
+
+        if re.match(r"^\s*(?:comparar|diff)\s+snapshots\s+memoria\b", low):
+            rows = self.memory.list_memory_snapshots(limit=20)
+            if len(rows) < 2:
+                return OrchestrationResult(True, "Necesito al menos 2 snapshots para comparar.", "memory_snapshot_compare_need_two")
+            nums = [int(n) for n in re.findall(r"\b(\d+)\b", low)]
+            a_idx = nums[0] - 1 if len(nums) >= 1 else 0
+            b_idx = nums[1] - 1 if len(nums) >= 2 else 1
+            if a_idx < 0 or b_idx < 0 or a_idx >= len(rows) or b_idx >= len(rows) or a_idx == b_idx:
+                return OrchestrationResult(True, "Índices inválidos para comparar snapshots.", "memory_snapshot_compare_bad_index")
+            cmp = self.memory.compare_memory_snapshots(rows[a_idx], rows[b_idx])
+            if not cmp.get("ok"):
+                return OrchestrationResult(True, "No pude comparar snapshots ahora.", "memory_snapshot_compare_error")
+            if cmp.get("same"):
+                return OrchestrationResult(
+                    True,
+                    f"Snapshots iguales: {rows[a_idx].name} y {rows[b_idx].name}.",
+                    "memory_snapshot_compare_same",
+                )
+            details = []
+            if cmp.get("added"):
+                details.append("Agregados: " + ", ".join(cmp["added"]))
+            if cmp.get("removed"):
+                details.append("Eliminados: " + ", ".join(cmp["removed"]))
+            if cmp.get("changed"):
+                details.append("Cambiados: " + ", ".join(cmp["changed"]))
+            return OrchestrationResult(
+                True,
+                f"Diferencias entre {rows[a_idx].name} y {rows[b_idx].name}:\n" + "\n".join(details),
+                "memory_snapshot_compare",
+            )
+
+        if re.match(r"^\s*(?:diagn[oó]stico|estado)\s+(?:de\s+)?(?:salud|sistema|eda)\b", low):
+            checks = run_health_check()
+            ok = sum(1 for v in checks.values() if str(v).lower().startswith("ok"))
+            warn = sum(1 for v in checks.values() if str(v).lower().startswith(("warn", "missing", "offline", "error")))
+            top = []
+            for key, val in checks.items():
+                sval = str(val).lower()
+                if sval.startswith(("warn", "missing", "offline", "error")):
+                    top.append(f"- {key}: {val}")
+                if len(top) >= 6:
+                    break
+            detail = "\n".join(top) if top else "- Sin alertas relevantes."
+            return OrchestrationResult(
+                True,
+                f"Diagnóstico rápido: OK={ok}, alertas={warn}.\n{detail}",
+                "health_diagnostic",
+            )
+
+        if re.match(r"^\s*(?:exportar|guardar)\s+(?:diagn[oó]stico|reporte)\b", low):
+            checks = run_health_check()
+            report = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "checks": checks,
+                "conversation_style": str(getattr(self.core, "conversation_style", "unknown")),
+                "trigger_count": len(self.triggers.list_triggers(active_only=False)),
+            }
+            out_dir = config.EXPORTS_DIR
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / f"diagnostico_eda_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            return OrchestrationResult(True, f"Reporte de diagnóstico exportado en: {out}", "health_report_exported")
 
         quick_trigger = self._parse_trigger_chat_request(clean)
         if quick_trigger is not None:
@@ -424,6 +698,14 @@ class CommandOrchestrator:
                 f"Perfil actualizado: {', '.join(f'{k}={v}' for k, v in identity_facts.items())}",
                 tags=["identity", "profile"],
                 importance=5,
+            )
+        preference_facts = self.memory.update_preferences_from_text(clean)
+        if preference_facts:
+            self.memory.save_long_term_memory(
+                clean,
+                f"Preferencias actualizadas: {', '.join(f'{k}={v}' for k, v in preference_facts.items())}",
+                tags=["preference", "profile"],
+                importance=4,
             )
 
         if low.startswith("recuerda que"):
@@ -454,6 +736,12 @@ class CommandOrchestrator:
                 )
                 return OrchestrationResult(True, "Trigger detectado. ¿Confirmas ejecución? (Sí/No)", "trigger_confirm_required")
             result = self._execute_trigger_action(t)
+            self.triggers.log_trigger_run(
+                int(t.get("id", 0)),
+                status="ok",
+                detail=result,
+                source="auto",
+            )
             self._audit_operate_secure(
                 "trigger_executed",
                 f"trigger_id={t.get('id')}",
@@ -531,6 +819,32 @@ class CommandOrchestrator:
         if self.can_execute and not self.can_execute(clean):
             return OrchestrationResult(True, "Acción bloqueada por permisos/configuración.", "security")
 
+        if re.match(r"^\s*(?:modo|perfil)\s+(?:de\s+)?(?:pol[ií]tica|seguridad)\b", low):
+            m = re.search(r"\b(normal|trabajo|reunion|reunión|noche|auto)\b", low)
+            if not m:
+                effective = self._effective_policy_mode()
+                return OrchestrationResult(
+                    True,
+                    (
+                        f"Modo política actual: {self._policy_mode} (efectivo: {effective}). "
+                        "Opciones: normal, trabajo, reunion, noche, auto."
+                    ),
+                    "policy_mode_help",
+                )
+            chosen = m.group(1).replace("reunión", "reunion")
+            self._policy_mode = chosen
+            return OrchestrationResult(True, f"Modo política establecido en: {chosen}.", "policy_mode_set")
+
+        if re.match(r"^\s*(?:simula|dry\s*run)\b", low):
+            preview_text = re.sub(r"^\s*(?:simula|dry\s*run)\s*:?\s*", "", clean, flags=re.IGNORECASE).strip()
+            preview = self._build_risk_preview(preview_text) if preview_text else ""
+            if not preview:
+                preview = (
+                    f"Simulación de: {preview_text or clean}\n"
+                    "Efectos previstos: comando analizado sin ejecutar cambios reales."
+                )
+            return OrchestrationResult(True, preview, "dry_run_preview")
+
         if self._pending_risky_action is not None:
             decision = detect_confirmation(clean)
             if decision is True:
@@ -582,6 +896,16 @@ class CommandOrchestrator:
             return OrchestrationResult(True, "Responde Sí o No para confirmar reinicio del sistema.", "restart_wait")
 
         risk_preview = self._build_risk_preview(clean)
+        effective_policy = self._effective_policy_mode()
+        if risk_preview and effective_policy in {"reunion", "noche"}:
+            return OrchestrationResult(
+                True,
+                (
+                    f"Acción bloqueada por política '{effective_policy}'. "
+                    "Usa 'simula ...' para revisar impacto o cambia a modo política normal/trabajo."
+                ),
+                "policy_blocked_risky_action",
+            )
         if risk_preview:
             self._pending_risky_action = {"user_text": clean, "preview": risk_preview}
             return OrchestrationResult(
@@ -611,8 +935,16 @@ class CommandOrchestrator:
 
         parsed = parse_command(clean)
         intent = parsed.intent
-        conf_str = f"{float(parsed.confidence or 0.0):.2f}"
+        conf = float(parsed.confidence or 0.0)
+        conf_str = f"{conf:.2f}"
         log.info("[ORCHESTRATOR] Intent detected: %s | entity=%s | conf=%s", intent, parsed.entity, conf_str)
+
+        if self._needs_clarification(clean, intent, conf, str(parsed.entity or "")):
+            return OrchestrationResult(
+                True,
+                "No estoy totalmente seguro de tu intención. ¿Quieres abrir/cerrar una app o reproducir música/video?",
+                "needs_clarification",
+            )
 
         # Prioridad dura de música: evita que "reproduce X" caiga al ActionAgent.
         if self._is_likely_music_request(clean) or intent in {"play_music", "open_and_play_music"}:
@@ -663,11 +995,16 @@ class CommandOrchestrator:
             and not self._is_likely_system_command(clean)
             and float(parsed.confidence or 0.0) < self._command_conf_threshold()
         ):
+            cached = self._cache_get(clean)
+            if cached:
+                return OrchestrationResult(True, cached, "conversation_llm_cache")
             mem = self.memory.get_memory()
             history = mem.get("chat_history", []) or mem.get("history", [])
             log.info("[ORCHESTRATOR] route chosen: llm_conversation (score=%s)", conf_str)
             answer = self.core.ask(clean, history=history, allow_web_fallback=self._should_use_web_for_question(clean, intent))
-            return OrchestrationResult(True, f"Te explico: {answer}", "conversation_llm")
+            if answer:
+                self._cache_set(clean, answer)
+            return OrchestrationResult(True, answer, "conversation_llm")
 
         handled, answer = self.action_agent.try_handle(clean)
         if handled:
@@ -686,6 +1023,10 @@ class CommandOrchestrator:
                 return OrchestrationResult(True, qa_answer, qa_source)
             response_instruction = self._response_instruction_for_intent(intent)
             use_web = self._should_use_web_for_question(clean, intent)
+            if not use_web:
+                cached = self._cache_get(clean)
+                if cached:
+                    return OrchestrationResult(True, cached, "knowledge_answer_cache")
             mem = self.memory.get_memory()
             history = mem.get("chat_history", []) or mem.get("history", [])
             if use_web and intent == "search_request" and remote_llm.remote_search_mode_requested():
@@ -702,6 +1043,8 @@ class CommandOrchestrator:
                 allow_web_fallback=use_web,
                 response_instruction=response_instruction,
             )
+            if answer and not use_web:
+                self._cache_set(clean, answer)
             if not use_web:
                 log.info("[ORCHESTRATOR] Fallback: web search not used")
             return OrchestrationResult(True, answer, "knowledge_answer")
@@ -1238,7 +1581,23 @@ class CommandOrchestrator:
         return f"No pude crear la presentación: {result.get('message', 'error desconocido')}"
 
     def persist(self, user_text: str, answer: str, record_behavior: bool = True) -> None:
-        self.memory.add_history(user_text, answer)
+        parsed_intent = "chat"
+        parsed_entity = ""
+        if record_behavior:
+            try:
+                parsed = parse_command(user_text)
+                parsed_intent = str(parsed.intent or "chat")
+                parsed_entity = str(parsed.entity or "")
+            except Exception:
+                parsed_intent = "chat"
+                parsed_entity = ""
+        self.memory.persist_interaction(
+            user_text,
+            answer,
+            intent=parsed_intent,
+            entity=parsed_entity,
+            record_behavior=record_behavior,
+        )
         importance = 1
         tags: list[str] = ["interaction"]
         low = (user_text or "").lower()
@@ -1249,13 +1608,6 @@ class CommandOrchestrator:
             importance = 2
             tags.append("question")
         self.memory.save_long_term_memory(user_text, answer, tags=tags, importance=importance)
-        if not record_behavior:
-            return
-        try:
-            parsed = parse_command(user_text)
-            self.memory.record_behavior_event(parsed.intent, parsed.entity, user_text)
-        except Exception:
-            pass
 
     @staticmethod
     def _parse_trigger_chat_request(text: str) -> dict[str, Any] | None:
@@ -1305,6 +1657,18 @@ class CommandOrchestrator:
                 return "URL inválida."
             self.actions.open_website(url)
             return f"Abrí {url}"
+        if action_type == "open_website":
+            url = str(payload.get("url", "")).strip()
+            parsed = url.lower()
+            if not (parsed.startswith("http://") or parsed.startswith("https://")):
+                return "URL inválida."
+            self.actions.open_website(url)
+            return f"Abrí {url}"
+        if action_type == "speak":
+            text = str(payload.get("text", "")).strip()
+            if not text:
+                return "No hay texto para hablar."
+            return text
         if action_type == "run_script":
             if not config.TRIGGERS_ALLOW_RUN_SCRIPTS:
                 return "run_script deshabilitado por configuración."
@@ -1368,7 +1732,7 @@ class CommandOrchestrator:
         self._pending_youtube_options = top
         top_conf = float(str(top[0].get("confidence", "0.0")))
         # Modo transparente: siempre presentar opciones y pedir elección explícita.
-        auto_open = False
+        auto_open = bool(getattr(config, "YOUTUBE_AUTO_OPEN", False))
         conf_min = float(getattr(config, "YT_AUTO_OPEN_CONF", 0.95))
         auto_skip_memes = bool(getattr(config, "YT_AUTO_SKIP_KNOWN_MEMES", False))
         suspicious = is_suspicious_result_for_query(
